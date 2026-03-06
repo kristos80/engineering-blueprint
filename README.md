@@ -2,6 +2,62 @@
 
 An opinionated engineering blueprint for building applications. Language-agnostic, framework-agnostic. These standards apply to any project built on object-oriented, stateless request-response architecture.
 
+## How to Use This Blueprint
+
+This is a **standalone reference** — a map for engineering decisions across projects. It is not tied to any specific codebase.
+
+**For new projects:** adopt these standards from day one. Reference this blueprint in your project's `CLAUDE.md` to have AI-assisted development follow these rules automatically.
+
+**For existing projects:** adopt selectively. Use the table of contents to find the section relevant to your current decision, and apply what fits.
+
+**For AI-assisted development:** point Claude Code at this blueprint by adding the following to your project's `CLAUDE.md`:
+
+```
+## Engineering Standards
+Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/README.md
+```
+
+## Table of Contents
+
+- [Design Principles](#design-principles)
+- [Project Structure](#project-structure)
+- [Architecture](#architecture)
+  - [Layers](#layers)
+  - [Dependency Direction](#dependency-direction)
+  - [Dependency Injection](#dependency-injection)
+  - [File Conventions](#file-conventions)
+  - [Use Case Rules](#use-case-rules)
+  - [Controller Conventions](#controller-conventions)
+  - [Transaction Boundaries](#transaction-boundaries)
+- [API Design](#api-design)
+  - [Response Format](#response-format)
+  - [Error Handling](#error-handling)
+  - [Input Validation](#input-validation)
+  - [Authentication & Authorization](#authentication--authorization)
+  - [API Versioning](#api-versioning)
+  - [Rate Limiting](#rate-limiting)
+- [Reliability](#reliability)
+  - [Event System](#event-system)
+  - [Critical Flows](#critical-flows)
+  - [State Guards & Idempotency](#state-guards--idempotency)
+  - [Data Evolution Safety](#data-evolution-safety)
+- [Infrastructure](#infrastructure)
+  - [Background Jobs & Queues](#background-jobs--queues)
+  - [Database Strategy](#database-strategy)
+  - [Caching](#caching)
+  - [Logging & Observability](#logging--observability)
+  - [CI/CD Pipeline](#cicd-pipeline)
+  - [Security](#security)
+- [Subscriptions & Payments](#subscriptions--payments)
+- [Testing](#testing)
+  - [Requirements](#requirements)
+  - [Stubs vs Mocks](#stubs-vs-mocks)
+  - [Isolation Per Layer](#isolation-per-layer)
+  - [Infrastructure Integration Tests](#infrastructure-integration-tests)
+  - [Test Structure](#test-structure)
+- [Scaling Guidelines](#scaling-guidelines)
+- [AI-Assisted Engineering](#ai-assisted-engineering)
+
 ## Design Principles
 
 1. **Stateless.** No in-memory state between requests. Tokens provide identity, the database provides data. Scales horizontally by adding containers behind a load balancer.
