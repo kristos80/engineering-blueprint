@@ -104,7 +104,7 @@ Controller  -->  UseCase (interface)  <--  UseCase (implementation)
                                            Domain
 ```
 
-Controllers depend on use case interfaces. Use case implementations depend on domain. Nothing depends inward-to-outward.
+Controllers depend on use case interfaces. Use case implementations depend on domain. Nothing depends on inward-to-outward.
 
 ### Dependency Injection
 
