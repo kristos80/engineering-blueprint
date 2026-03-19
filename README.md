@@ -29,6 +29,8 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Use Case Rules](#use-case-rules)
   - [Controller Conventions](#controller-conventions)
   - [Transaction Boundaries](#transaction-boundaries)
+    - [Synchronous (Single Connection)](#synchronous-single-connection)
+    - [Async with Connection Pools](#async-with-connection-pools)
 - [API Design](#api-design)
   - [Response Format](#response-format)
   - [Error Handling](#error-handling)
@@ -176,6 +178,52 @@ class CreateBookingUseCase implements CreateBookingUseCaseInterface
 - `TransactionInterface` wraps begin/commit/rollback (swappable for testing)
 - Repositories are transaction-unaware — they just run queries
 - Simple use cases without multiple writes don't need a transaction
+
+#### Synchronous (Single Connection)
+
+In traditional synchronous request-response frameworks (e.g., PHP with PDO, Java with JDBC), there is one database connection per request. The transaction is implicit on that connection — `beginTransaction()`, repositories execute queries, `commit()`. Every query between begin and commit shares the same connection by default, because there's no other connection to use. Repositories don't need to know about the transaction — the single-connection-per-request model handles it invisibly.
+
+```
+// Synchronous — one connection, implicit transaction scope
+transaction.run(() =>
+    repoA.insert(...)   // uses the single PDO/JDBC connection
+    repoB.insert(...)   // same connection — same transaction
+)
+```
+
+#### Async with Connection Pools
+
+In async runtimes with connection pools (e.g., PHP with AMPHP/ReactPHP, Node.js, Go), the single-connection assumption breaks. A pool holds multiple open connections, and each query grabs whichever is free. If a use case inserts a customer on connection 3 and an order on connection 7, they're in separate transaction scopes — rolling back connection 3 won't undo connection 7's write.
+
+The solution is a **connection holder** — a wrapper that normally delegates to the pool, but during a transaction gets swapped to the specific transaction connection. Repositories call `holder.get()` without knowing whether they're hitting the pool or a transaction connection.
+
+```
+// Async — connection holder swaps pool for transaction connection
+class ConnectionHolder
+    pool: ConnectionPool
+    transactionExecutor: Executor | null
+
+    function get(): Executor
+        return transactionExecutor ?? pool
+
+class Transaction implements TransactionInterface
+    function run(callback):
+        tx = pool.beginTransaction()          // opens transaction on a specific connection
+        holder.setTransactionExecutor(tx)     // redirect all queries to this connection
+        try:
+            result = callback()               // repositories call holder.get() → tx
+            tx.commit()
+            return result
+        catch:
+            tx.rollback()
+            throw
+        finally:
+            holder.setTransactionExecutor(null)  // back to pool mode
+```
+
+- Outside a transaction: `holder.get()` returns the pool — queries go to any available connection
+- Inside a transaction: `holder.get()` returns the transaction connection — all queries are atomic
+- Repositories are unaware of which mode they're in — same code, same interface, different behavior based on context
 
 ## API Design
 
