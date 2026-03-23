@@ -468,7 +468,11 @@ Deploy 3 (contract): Remove old column/field, code only uses new
 
 ### Backward Compatibility Testing
 
-The expand-contract pattern describes _when_ to evolve data. This section describes _how to prove_ that old data still works after every change — and what structurally prevents you from skipping it.
+**This applies to unstructured data inside structured columns** — JSON columns, queue payloads, and cached objects. These are the formats the database cannot enforce.
+
+Schema-level changes (adding columns, renaming, changing types) don't need this discipline. Migrations either complete with defaults and backfills or fail — the database enforces the contract. End-to-end tests validate that code and schema stay in sync.
+
+But a JSON column is opaque to the database. Old rows keep their old shape forever unless explicitly migrated. Queue jobs serialized before a deploy sit alongside jobs serialized after. The database won't reject a missing key or a renamed field — your code will just break at runtime. This is where backward compatibility must be enforced in code and tests.
 
 #### Single-entry-point deserializer
 
@@ -549,6 +553,8 @@ Three layers enforce the discipline:
 | **Expand-contract deploy sequence** | Procedural — you cannot remove old data before new code handles both shapes, and you cannot remove old code until backfill is verified. |
 
 No single layer is sufficient alone. The deserializer centralizes the logic. The fixtures prove every version works. The expand-contract sequence ensures old and new coexist long enough for the migration to complete.
+
+**Schema-level changes don't need this.** The database itself is the enforcement layer — migrations succeed with correct defaults or fail. End-to-end tests against a real database validate that code and schema agree. The discipline above exists precisely because JSON columns, queues, and caches lack that built-in enforcement.
 
 ## Infrastructure
 
