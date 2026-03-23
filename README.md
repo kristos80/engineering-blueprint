@@ -59,6 +59,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Infrastructure Integration Tests](#infrastructure-integration-tests)
   - [Test Structure](#test-structure)
 - [Scaling Guidelines](#scaling-guidelines)
+- [On Frameworks](#on-frameworks)
 - [AI-Assisted Engineering](#ai-assisted-engineering)
 
 ## Design Principles
@@ -872,6 +873,36 @@ Current structure is **layer-first** — correct at small scale.
 - Use case interfaces — contracts, not overhead. Enable test doubles, explicit DI, and readable boundaries.
 - One use case = one transaction boundary
 - Repositories and external services behind interfaces
+
+## On Frameworks
+
+This blueprint does not require a framework. It is not against frameworks either — but it is worth being honest about what they cost.
+
+Most of what this blueprint describes is simple to build from scratch. A DI container is a map of interfaces to factory functions. A router is a list of patterns matched against a request path. Middleware is a chain of callables. A JSON response envelope is a helper that wraps an array. A transaction wrapper is begin/commit/rollback behind an interface. A database-backed queue is a table with `FOR UPDATE SKIP LOCKED`. None of these require tens of thousands of lines of framework code.
+
+Frameworks ship enormous dependency trees to cover every possible use case — most of which you will never need. You inherit their abstractions, their conventions, their upgrade cycles, and their bugs. When your needs diverge from the framework's assumptions — and they will — you spend time fighting the framework instead of solving your problem. The debugging surface area grows from "your code" to "your code plus everything the framework does behind the scenes."
+
+**What you actually need from external code:**
+
+| Concern | What to reach for |
+|---------|-------------------|
+| HTTP request/response | A thin PSR-compliant library or standard-library HTTP module — not a full-stack framework |
+| Routing | A standalone router (~200 lines of code, or a small library) |
+| DI container | A simple container or write your own — interface-to-factory bindings are trivial |
+| Database access | The language's database driver with prepared statements |
+| Template rendering | A standalone template engine, if you serve HTML at all |
+| Testing | A test framework — this is the one dependency worth taking seriously |
+
+**What you don't need a framework for:**
+
+- Use cases, controllers, repositories, domain objects — these are your code, structured by your architecture
+- Validation, error handling, response formatting — straightforward to write, and you own the behavior
+- Middleware, event dispatching, job queues — simple patterns, small implementations
+- Auth middleware, JWT handling — a JWT library plus a few lines of middleware
+
+The value of owning these pieces is not about avoiding dependencies on principle. It is about understanding every line that runs in production. When something breaks at 2 AM, you are debugging code you wrote — not tracing through a framework's internals trying to figure out which of its 400 classes intercepted your request.
+
+Frameworks are useful when you need to ship something fast with a team that already knows the framework. They are less useful when you have clear architectural standards, a small dependency surface, and the discipline to build what you need. This blueprint assumes the latter.
 
 ## AI-Assisted Engineering
 
