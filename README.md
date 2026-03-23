@@ -43,6 +43,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Critical Flows](#critical-flows)
   - [State Guards & Idempotency](#state-guards--idempotency)
   - [Data Evolution Safety](#data-evolution-safety)
+  - [Backward Compatibility Testing](#backward-compatibility-testing)
 - [Infrastructure](#infrastructure)
   - [Background Jobs & Queues](#background-jobs--queues)
   - [Database Strategy](#database-strategy)
@@ -464,6 +465,90 @@ Deploy 1 (expand):  Add new column/field, code writes to both old and new
 Deploy 2 (migrate): Backfill old data
 Deploy 3 (contract): Remove old column/field, code only uses new
 ```
+
+### Backward Compatibility Testing
+
+The expand-contract pattern describes _when_ to evolve data. This section describes _how to prove_ that old data still works after every change — and what structurally prevents you from skipping it.
+
+#### Single-entry-point deserializer
+
+Code never reads versioned data (JSON columns, queue payloads, cached objects) directly. Every versioned format has a **deserializer** — a single factory method that accepts any known version and returns the current domain object:
+
+```
+class ProfessionalPayload
+
+    static function fromArray(raw: Map): ProfessionalPayload
+        version = raw["version"] ?? 1
+
+        if version == 1
+            return new ProfessionalPayload(
+                name: raw["name"],
+                contact: raw["phone"],          // v1 used "phone"
+                specialties: []                  // v1 had no specialties
+            )
+
+        if version == 2
+            return new ProfessionalPayload(
+                name: raw["name"],
+                contact: raw["phone"],
+                specialties: raw["specialties"]
+            )
+
+        if version == 3
+            return new ProfessionalPayload(
+                name: raw["name"],
+                contact: raw["contact"],         // v3 renamed "phone" → "contact"
+                specialties: raw["specialties"]
+            )
+
+        throw UnknownPayloadVersionException(version)
+```
+
+All code that reads the data calls `ProfessionalPayload::fromArray()`. No caller inspects the raw JSON. This gives you one place to maintain, one place to test, and one place that breaks if a version is mishandled.
+
+#### Fixture-per-version tests
+
+For every versioned data format, maintain a test fixture for each historical version. Each fixture is a real snapshot of what the database, queue, or cache actually contains:
+
+```
+tests/fixtures/
+  professional_payload_v1.json   # original shape
+  professional_payload_v2.json   # added "specialties"
+  professional_payload_v3.json   # renamed "phone" → "contact"
+```
+
+The deserializer test runs every fixture and asserts it normalizes to the same domain object:
+
+```
+/** @dataProvider provideAllPayloadVersions */
+function testDeserializesAllVersions(fixture: String, expected: Map): void
+    raw = jsonDecode(readFile(fixture))
+    result = ProfessionalPayload.fromArray(raw)
+
+    assertEqual(expected["name"], result.name)
+    assertEqual(expected["contact"], result.contact)
+    assertEqual(expected["specialties"], result.specialties)
+```
+
+If a new version breaks deserialization of any previous version, this test fails.
+
+#### Rules
+
+1. **Never delete old fixtures.** They represent data that exists in production. Removing a fixture removes the proof that old data still works.
+2. **Every new version requires a new fixture.** Adding a version without a fixture is incomplete — CI coverage gates will catch the untested branch.
+3. **The deserializer rejects unknown versions explicitly.** Throw on `version > latest` rather than silently falling through — this catches payloads from a newer deploy reaching an older worker during rolling updates.
+
+#### Why this forces backward compatibility
+
+Three layers enforce the discipline:
+
+| Layer | What it enforces |
+|-------|------------------|
+| **Single-entry-point deserializer** | Structural — there is one place to break, one place to fix. No caller can bypass the version handling. |
+| **Fixture-per-version tests in CI** | Automated — adding a version without a fixture fails coverage. Breaking an old version's deserialization fails the test. |
+| **Expand-contract deploy sequence** | Procedural — you cannot remove old data before new code handles both shapes, and you cannot remove old code until backfill is verified. |
+
+No single layer is sufficient alone. The deserializer centralizes the logic. The fixtures prove every version works. The expand-contract sequence ensures old and new coexist long enough for the migration to complete.
 
 ## Infrastructure
 
