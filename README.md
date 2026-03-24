@@ -50,6 +50,12 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Caching](#caching)
   - [Logging & Observability](#logging--observability)
   - [CI/CD Pipeline](#cicd-pipeline)
+    - [Hotfix Process](#hotfix-process)
+  - [Deployment](#deployment)
+    - [Release Identification](#release-identification)
+    - [Deployment Strategy](#deployment-strategy)
+    - [Rollback](#rollback)
+    - [Health Checks](#health-checks)
   - [Security](#security)
 - [Subscriptions & Payments](#subscriptions--payments)
 - [Testing](#testing)
@@ -671,17 +677,68 @@ Use a standard logging interface — implementation is swappable (file, stdout, 
 - Database migrations against production-like schema
 - Frontend build + lint
 
-**No merge without green CI.** No exceptions, no "I'll fix it later."
+**No merge without green CI.** No exceptions, no "I'll fix it later" — except hotfixes (see below).
 
-**Deployment:**
+#### Hotfix Process
+
+When production is broken and the fix is obvious, you don't wait for mutation testing. But "skip CI" is never the answer — a reduced pipeline is.
+
+1. **Branch from the production SHA** — not from `main`, which may contain unreleased changes
+2. **Reduced CI**: unit tests for the affected area + static analysis. Skip mutation testing, skip full suite.
+3. **Deploy the hotfix** through the normal deployment pipeline
+4. **Merge back to `main` through full CI within 24 hours.** If full CI fails, fix it immediately — untested code does not stay in production.
+5. **Log the incident**: what broke, what the fix was, why the fast track was used
+
+The rule: *full CI before merge. Hotfixes get reduced CI before deploy, full CI before merge to main.*
+
+Hotfixes that cannot pass even the reduced pipeline do not ship. If you cannot write a fix that passes unit tests and static analysis, the fix is not ready.
+
+### Deployment
+
+#### Release Identification
+
+The git SHA is your version. It is unique, unforgeable, and already in your tooling.
+
+- **Git SHA (or short SHA) identifies every release.** Build artifacts, deployment logs, and health check endpoints should expose the SHA that is running.
+- **Git tags for milestones** — when you need a human-readable reference point (incident postmortems, "deploy the version from before X"). Use date-based tags: `release/2025-03-24`, or tag after significant features land.
+- **SemVer only when you publish.** If the application becomes a library, ships a public API with external consumers, or has mobile clients that pin to versions — adopt SemVer then. Until you have consumers who independently choose when to upgrade, a version number is ceremony without a reader.
+
+#### Deployment Strategy
 
 ```
 Build → Run migrations → Deploy code → Health check → Route traffic
 ```
 
 - Migrations run before new code is live (expand-contract ensures backwards compatibility)
-- Health check endpoint confirms app is functional before routing traffic
-- Rollback = deploy previous version (migrations are forward-only, compensate with new migrations)
+- Health check confirms the instance is functional before it receives traffic
+
+**Rolling deploy is the default.** Replace instances one at a time behind the load balancer. The architecture is stateless — any instance can handle any request. Zero downtime with no extra infrastructure.
+
+| Strategy | Trigger | What it gives you |
+|----------|---------|-------------------|
+| **Rolling deploy** | Default — start here | Zero downtime, simple, no extra infra |
+| **Blue-green** | Need instant rollback (seconds, not minutes) | Two environments, swap the router. Rollback is a LB switch, not a redeploy |
+| **Canary** | High traffic, high risk changes, observability maturity in place | Route small % of traffic to new version, watch metrics, expand gradually |
+
+Adopt blue-green or canary when rolling deploys cause pain — not before. Same principle as the scaling guidelines.
+
+#### Rollback
+
+Rollback is deploying the previous known-good SHA. It is code rollback only — never migration rollback.
+
+- **Tag the current production SHA before every deploy.** If the new version fails, you know exactly what to redeploy.
+- **Migrations are forward-only.** Expand-contract ensures the old code works with the new schema, so rolling back the code is always safe.
+- **If you need to undo a data change, write a new migration forward.** Do not manually reverse migrations — that path leads to schema drift.
+- **Rollback is not free.** If you deployed a "contract" migration (dropped a column), the old code that reads that column cannot be rolled back to. This is why expand-contract separates expand and contract into different releases.
+
+#### Health Checks
+
+Two endpoints, two purposes:
+
+- **Liveness** (`/health/live`): "Is the process alive?" Returns 200 if the application is running. No dependency checks. Used by the orchestrator to decide whether to restart the container.
+- **Readiness** (`/health/ready`): "Can it serve traffic?" Checks database connectivity, critical dependencies. Used by the load balancer to decide whether to route traffic to this instance.
+
+The distinction matters for rolling deploys: an instance that is alive but still running migrations or warming up should not receive traffic. Liveness keeps it from being killed; readiness keeps it out of the rotation until it is ready.
 
 ### Security
 
