@@ -66,6 +66,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Test Structure](#test-structure)
 - [Scaling Guidelines](#scaling-guidelines)
 - [On Frameworks](#on-frameworks)
+- [Code Reviews](#code-reviews)
 - [AI-Assisted Engineering](#ai-assisted-engineering)
 
 ## Design Principles
@@ -960,6 +961,21 @@ Frameworks ship enormous dependency trees to cover every possible use case — m
 The value of owning these pieces is not about avoiding dependencies on principle. It is about understanding every line that runs in production. When something breaks at 2 AM, you are debugging code you wrote — not tracing through a framework's internals trying to figure out which of its 400 classes intercepted your request.
 
 Frameworks are useful when you need to ship something fast with a team that already knows the framework. They are less useful when you have clear architectural standards, a small dependency surface, and the discipline to build what you need. This blueprint assumes the latter.
+
+## Code Reviews
+
+Software engineering isn't always a solo endeavor; it usually is a collective craft that requires engineers to contribute to complex, existing code bases while staying in constant sync with their peers. This is precisely why code reviews are such a vital part of the development lifecycle.
+
+What to focus on during a code review:
+
+- First of all, you need to be familiar with the feature. If you aren't, you need to become. Don't simply look at the dry code diff.
+- Has the change been done in the correct component? Did we treat the symptom or the root cause?
+- Functionality. Does it cover all use cases?
+- Is it performant? Will it scale well?
+- Are meaningful comments added or updated? Do they explain the "why"?
+- Backwards compatibility. Will it replace another functionality? How will we deploy it? How will we test it? Does it replace an existing feature? Is it OK to merge it now or should we wait for another pull request to be merged first? Does merging this change affect other teams?
+- Does it have (updated) tests?
+- Finally consistency: naming, coding standards, git commit message, squashed commits
 
 ## AI-Assisted Engineering
 
