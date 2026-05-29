@@ -964,18 +964,55 @@ Frameworks are useful when you need to ship something fast with a team that alre
 
 ## Code Reviews
 
-Software engineering isn't always a solo endeavor; it usually is a collective craft that requires engineers to contribute to complex, existing code bases while staying in constant sync with their peers. This is precisely why code reviews are such a vital part of the development lifecycle.
+Code reviews catch what CI cannot: architectural drift, unclear intent, premature complexity, missing context. They are not a substitute for tests, static analysis, or the backward compatibility gates described elsewhere — those run first.
 
-What to focus on during a code review:
+### Prerequisites
 
-- First of all, you need to be familiar with the feature. If you aren't, you need to become. Don't simply look at the dry code diff.
-- Has the change been done in the correct component? Did we treat the symptom or the root cause?
-- Functionality. Does it cover all use cases?
-- Is it performant? Will it scale well?
-- Are meaningful comments added or updated? Do they explain the "why"?
-- Backwards compatibility. Will it replace another functionality? How will we deploy it? How will we test it? Does it replace an existing feature? Is it OK to merge it now or should we wait for another pull request to be merged first? Does merging this change affect other teams?
-- Does it have (updated) tests?
-- Finally consistency: naming, coding standards, git commit message, squashed commits
+- **CI must be green before review.** Reviewer time is not spent on what the pipeline already catches (formatting, type errors, coverage, mutation score, security audit, dependency vulnerabilities).
+- **The author self-reviews the diff first.** If you would not approve it, do not request review.
+- **One concern per PR.** Large PRs get reviewed superficially. Split before requesting review.
+
+### What blocks merge
+
+- One approval from a reviewer familiar with the area. Two when the change crosses domains (auth, billing, migrations) or affects other teams.
+- All CI checks green.
+- Open threads resolved by the author, not auto-closed.
+
+### Author responsibilities
+
+- **Description states the *why*, not the *what*** — the diff already shows the what.
+- **Link the ticket or incident.** For bug fixes, include the reproduction steps and the root cause.
+- **Flag deploy ordering explicitly:** "depends on PR #X", "requires migration to run first", "ships behind feature flag", "second deploy of an expand-contract sequence".
+
+### Reviewer focus
+
+The reviewer is checking what the author cannot see in their own code: drift from the architecture and gaps in intent.
+
+| Check | What to look for |
+|-------|------------------|
+| **Familiar with the feature** | Understand what the change is for before reading the diff. A diff without context invites surface-level review. |
+| **Right layer** | Business logic in the use case, not the controller. SQL in the repository, not the use case. External calls behind an interface. |
+| **Right scope** | Use cases do not call other use cases. Controllers carry no business logic. Shared logic extracted into repository methods or domain services. |
+| **Root cause, not symptom** | The change addresses the cause. A deliberate workaround needs a comment explaining why the root cause was deferred. |
+| **Intent is clear** | Names and structure communicate what the code does. Comments explain *why* only where the why is non-obvious. |
+| **Tests reflect behavior** | New behavior has tests. Test names describe behavior, not implementation. Stubs by default, mocks only when the side effect is the behavior. |
+| **No premature complexity** | New patterns, abstractions, or dependencies justified by current pain — not anticipated needs. Three similar lines is better than a premature abstraction. |
+
+### What is already enforced elsewhere — do not relitigate
+
+Review confirms these were followed; it does not duplicate their work:
+
+- **Backward compatibility of unstructured data** (JSON columns, queue payloads, cache) — covered by deserializer + fixture-per-version tests. See [Backward Compatibility Testing](#backward-compatibility-testing).
+- **Schema changes** — covered by expand-contract migrations. See [Data Evolution Safety](#data-evolution-safety).
+- **Test coverage and mutation score** — enforced by CI gates.
+- **Style and formatting** — enforced by linters and formatters.
+- **Performance and scalability speculation** — the blueprint adopts scaling patterns when pain arrives, not before (see [Scaling Guidelines](#scaling-guidelines)). Flag a known bottleneck on a hot path; do not speculate about hypothetical scale.
+
+### What review is not
+
+- A style argument.
+- A re-design session. If you would build it differently, say so once, then defer unless it materially harms maintainability.
+- A blocker for unrelated cleanup. Open a follow-up issue rather than expanding the PR.
 
 ## AI-Assisted Engineering
 
