@@ -31,6 +31,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Transaction Boundaries](#transaction-boundaries)
     - [Synchronous (Single Connection)](#synchronous-single-connection)
     - [Async with Connection Pools](#async-with-connection-pools)
+  - [State in Long-Lived Processes](#state-in-long-lived-processes)
 - [API Design](#api-design)
   - [Response Format](#response-format)
   - [Error Handling](#error-handling)
@@ -71,7 +72,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 
 ## Design Principles
 
-1. **Stateless.** No in-memory state between requests. Tokens provide identity, the database provides data. Scales horizontally by adding containers behind a load balancer.
+1. **Stateless services.** Any instance can serve any request. Authoritative state lives in the database; tokens carry identity. Long-lived processes may hold *rebuildable* in-memory state (pools, caches) — never authoritative state. Scales horizontally behind a load balancer. See [State in Long-Lived Processes](#state-in-long-lived-processes).
 2. **Transactional.** Every use case that writes data is a single DB transaction — all or nothing.
 3. **Explicit over implicit.** Dependencies are injected, not resolved magically. State is checked, not assumed. Contracts are interfaces, not conventions.
 4. **No premature abstraction.** Three similar lines of code are better than a helper nobody asked for. Add structure when pain arrives, not before.
@@ -233,6 +234,27 @@ class Transaction implements TransactionInterface
 - Outside a transaction: `holder.get()` returns the pool — queries go to any available connection
 - Inside a transaction: `holder.get()` returns the transaction connection — all queries are atomic
 - Repositories are unaware of which mode they're in — same code, same interface, different behavior based on context
+
+### State in Long-Lived Processes
+
+"Stateless" applies to services, not processes. A PHP-FPM worker is recycled per request, so the language enforces process-level statelessness for free. A long-lived async runtime (Node.js, Go, async Python, JVM) does not — the process survives across requests and may legitimately hold rebuildable in-memory state: connection pools, prepared statement caches, compiled regexes, JIT-compiled query plans.
+
+The rule for any in-memory state in a long-lived process:
+
+1. **Rebuildable from authoritative storage** — losing it loses no data, only performance.
+2. **Not request-scoped to one instance** — a request must not depend on state held only on the instance it landed on. Any other instance can serve the same request.
+3. **Coherent across instances** — if the data can be mutated elsewhere (another instance, another process, the database directly), there must be a defined coherence model.
+
+The third point is the one that bites. Process A holds a cached user list. Process B writes the database. A's copy is now stale. Options, in order of preference:
+
+| Approach | When to use |
+|----------|-------------|
+| **Don't cache in process** — use a shared cache (Redis) and pay the network hop | Default. Preserves coherence for free; invalidation lives in one place. |
+| **TTL-based local cache** | Slow-changing data where bounded staleness is acceptable: feature flags, lookup tables (currencies, countries), config. |
+| **Pub/sub invalidation** | Hot data where the network hop matters and staleness is unacceptable. Adds infrastructure (Redis pub/sub, NATS, Kafka). |
+| **Event-sourced read models / CQRS** | Heavy machinery; only when simpler options have been outgrown. |
+
+Default to the first option. In-process caching imports a distributed-systems problem (coherence across instances) that a stateless request-response model gives you for free. The cost of a Redis hop is almost always less than the cost of debugging stale-read incidents.
 
 ## API Design
 
