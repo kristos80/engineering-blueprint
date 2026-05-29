@@ -868,7 +868,14 @@ Over-mocking makes tests brittle — an internal call reorder breaks tests even 
 - **Controller tests** stub the use case interface. Assert correct HTTP response.
 - **Use case tests** stub repository/service interfaces. No database, no external calls. Assert business rules. Mock only for critical side effects (payments, external APIs).
 - **Domain tests** need no doubles. Entities and value objects are pure.
-- **Repository tests** are integration tests — they run against a real test database. Stubbing the database in a repository test tests nothing.
+- **Repository tests** are both: unit tests that stub the data source to cover branching/orchestration logic, *and* integration tests against a real test database that verify the SQL works against the actual schema. Neither replaces the other.
+
+**On repository (and other infrastructure adapter) unit tests.** Repositories, cache adapters, queue adapters, and external API clients contain orchestration logic — null handling, conditional mapping, optional joins, fallback paths — that the 100% coverage requirement makes mandatory to test at the unit level. Integration tests alone cannot economically cover every branch, and the existence of a mapper does not eliminate the orchestration around it. Unit tests on these classes are required, not optional. The rule is what they assert:
+
+- **Valid** — behavior visible from the return value: "null in → null out", "row with field X → entity with field X", "two rows → list of two entities", "missing optional field → entity with default".
+- **Invalid** — implementation visible only through mocks: the exact SQL string, parameter binding order, driver method signatures, internal call sequences.
+
+The integration test owns the SQL/schema contract. The unit test owns the logic that lives in the class. Both exist; neither replaces the other.
 
 ### Infrastructure Integration Tests
 
@@ -989,7 +996,7 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 ### Testing
 
 - **Mocks where stubs suffice.** Mocks signal "the side effect *is* the behavior being verified." Stubs signal "this is a placeholder." Default to stubs.
-- **Mocking the database driver to "unit test" a repository.** That asserts SQL strings and driver calls, not behavior — the SQL can be wrong and the test still passes. Repository tests run against a real DB. If hydration logic is complex enough to warrant isolated tests (null handling, type coercion, JSON deserialization), extract it to a mapper — the mapper gets unit tests, the repository gets integration tests. Same rule for cache and queue adapters. See [Infrastructure Integration Tests](#infrastructure-integration-tests).
+- **Asserting SQL strings or driver call signatures in repository unit tests.** Couples tests to implementation — the SQL can change without behavior changing, and the test breaks. Stub the data source to verify branching logic (null handling, mapping, orchestration), but never assert *how* the query was constructed. The schema contract is verified by integration tests. See [Isolation Per Layer](#isolation-per-layer).
 - **Tests coupled to implementation.** Test names describe behavior, not method calls. Renaming a private method must not break a test.
 
 ### Process
