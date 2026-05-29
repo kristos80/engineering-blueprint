@@ -982,7 +982,7 @@ Code reviews catch what CI cannot: architectural drift, unclear intent, prematur
 
 - **Description states the *why*, not the *what*** — the diff already shows the what.
 - **Link the ticket or incident.** For bug fixes, include the reproduction steps and the root cause.
-- **Flag deploy ordering explicitly:** "depends on PR #X", "requires migration to run first", "ships behind feature flag", "second deploy of an expand-contract sequence".
+- **Flag anything that deviates from the default deploy flow.** Migrations always run before code (see [Deployment Strategy](#deployment-strategy)) — that does not need to be called out. Do call out: "depends on PR #X", "ships behind feature flag", "deploy 2 of 3 in an expand-contract sequence", "requires backfill job after deploy".
 
 ### Reviewer focus
 
