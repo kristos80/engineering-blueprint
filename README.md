@@ -66,6 +66,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Infrastructure Integration Tests](#infrastructure-integration-tests)
   - [Test Structure](#test-structure)
 - [Scaling Guidelines](#scaling-guidelines)
+- [Anti-Patterns](#anti-patterns)
 - [On Frameworks](#on-frameworks)
 - [Code Reviews](#code-reviews)
 - [AI-Assisted Engineering](#ai-assisted-engineering)
@@ -953,6 +954,49 @@ Current structure is **layer-first** — correct at small scale.
 - Use case interfaces — contracts, not overhead. Enable test doubles, explicit DI, and readable boundaries.
 - One use case = one transaction boundary
 - Repositories and external services behind interfaces
+
+## Anti-Patterns
+
+What this blueprint explicitly does not do. Each rule is enforced somewhere in the standards above — this section consolidates them for fast review and onboarding.
+
+### Architecture
+
+- **Use cases calling other use cases.** Creates implicit dependency graphs, hidden transactions, and untestable nesting. Extract shared logic into a repository method or domain service; orchestrate from one use case only.
+- **Business logic in controllers.** Controllers parse, validate, delegate, format. Branching on domain state, computing totals, deciding what to persist — all belong in the use case.
+- **Repository-to-repository calls.** Repositories are query executors, not orchestrators. Cross-entity coordination happens in the use case.
+- **Domain objects performing I/O.** No HTTP calls, queue dispatches, or filesystem writes from entities, value objects, or domain services. Side effects live behind interfaces, invoked from use cases.
+- **Framework types in the domain.** Use cases and entities import nothing framework-specific. HTTP requests stop at the controller. ORM models do not exist — repositories return domain objects, not framework rows.
+
+### Dependencies
+
+- **Service locator / global container access.** A class that pulls from a global registry hides its contract. Dependencies are constructor-injected, always.
+- **Static facades and ambient singletons.** Same problem in different clothing: invisible dependencies, untestable code, magical resolution.
+- **Concrete dependencies bypassing interfaces.** Use cases depend on `*Interface`, not on the SQL or HTTP implementation directly.
+
+### Data
+
+- **ORMs.** Repositories write parameterized SQL directly. ORMs hide cost (N+1, lazy loading) and bleed persistence concerns into the domain.
+- **String concatenation in SQL.** Parameterized queries only — including for "internal" or "trusted" input. There is no trusted input.
+- **Editing a deployed migration.** Schema history is append-only. Generate a new migration; never rewrite history that has run anywhere.
+- **`DOWN` migrations against live data.** Rollback is *code* rollback to the previous SHA. Live schema reversals corrupt data and the expand-contract pattern.
+
+### State and caching
+
+- **Cache as a source of truth.** Caches are rebuildable performance optimizations. If losing the cache loses data, it is not a cache.
+- **Time-based TTLs as the primary invalidation strategy.** Invalidate explicitly on write. TTL is a fallback for slow-changing data, not the default.
+- **Process-local caches without a coherence model.** Long-lived processes that cache domain data must tolerate staleness within a known TTL or invalidate via a shared mechanism. See [State in Long-Lived Processes](#state-in-long-lived-processes).
+
+### Testing
+
+- **Mocks where stubs suffice.** Mocks signal "the side effect *is* the behavior being verified." Stubs signal "this is a placeholder." Default to stubs.
+- **Unit-testing infrastructure adapters with mocks.** Repository tests hit a real database. Cache and queue adapters get integration tests. See [Infrastructure Integration Tests](#infrastructure-integration-tests).
+- **Tests coupled to implementation.** Test names describe behavior, not method calls. Renaming a private method must not break a test.
+
+### Process
+
+- **Premature scaling patterns.** Canary, blue-green, feature-first folders, DTOs — adopt when rolling deploys or 50+ use cases cause real pain. Not before.
+- **Bypassing CI for "just this once."** Hotfixes use the reduced pipeline (see [Hotfix Process](#hotfix-process)), never an empty one. `--no-verify` is not a hotfix tool.
+- **Tokens leaking past the auth boundary.** Controllers extract `userId` from the token. Use cases receive identifiers, never raw tokens or session objects.
 
 ## On Frameworks
 
