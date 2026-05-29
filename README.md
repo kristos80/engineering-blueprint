@@ -75,9 +75,10 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 ## Design Principles
 
 1. **Stateless services.** Any instance can serve any request. Authoritative state lives in the database; tokens carry identity. Long-lived processes may hold *rebuildable* in-memory state (pools, caches) — never authoritative state. Scales horizontally behind a load balancer. See [State in Long-Lived Processes](#state-in-long-lived-processes).
-2. **Transactional.** Every use case that writes data is a single DB transaction — all or nothing.
-3. **Explicit over implicit.** Dependencies are injected, not resolved magically. State is checked, not assumed. Contracts are interfaces, not conventions.
-4. **No premature abstraction.** Three similar lines of code are better than a helper nobody asked for. Add structure when pain arrives, not before.
+2. **Immutable data.** Entities, value objects, DTOs, use cases, controllers — all immutable. No setters, no in-place mutation. Behavior is functions that take immutable input and return new immutable output. State transitions produce new instances; they do not mutate existing ones.
+3. **Transactional.** Every use case that writes data is a single DB transaction — all or nothing.
+4. **Explicit over implicit.** Dependencies are injected, not resolved magically. State is checked, not assumed. Contracts are interfaces, not conventions.
+5. **No premature abstraction.** Three similar lines of code are better than a helper nobody asked for. Add structure when pain arrives, not before.
 
 ## Project Structure
 
@@ -111,13 +112,15 @@ Controller → UseCase → Repository/Domain
 
 ### Where Logic Lives
 
-Each piece of logic has exactly one correct home. Getting this wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, repositories that compute business rules.
+Logic placement follows two principles from above: data is immutable, and behavior is decomposed by operation. Entities carry data and enforce invariants but have no mutating methods. State transitions, calculations, and multi-entity coordination live in domain services — **one service per operation**, colocated with the aggregate it operates on. This trades language-enforced invariants for explicit data flow, trivial testability, and consistency with the rest of the blueprint's immutable style.
+
+Getting placement wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, repositories that compute business rules, services that turn into god-classes.
 
 | Logic type | Lives in | Examples |
 |------------|----------|----------|
-| Rules about a single entity's state or invariants | **Entity** | `Booking.confirm()`, `Booking.canBeCancelled()`, `User.changePassword()` |
-| Validation and behavior for a self-contained concept | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
-| Stateless calculation or coordination across multiple entities | **Domain Service** | `PricingService.calculate(booking, package, discounts)`, `AvailabilityService.findSlots(professional, range)` |
+| Immutable data + invariants enforced in the constructor | **Entity** | `new Booking(...)`, `Booking::createNew(...)`, `Booking::reconstituteFromRow(...)` — no setters, no mutating methods |
+| Self-contained immutable concept with validation and equality | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
+| One operation over domain data — state transition, calculation, or multi-entity coordination | **Domain Service** | `BookingConfirmer.confirm(booking)`, `BookingCanceller.cancel(booking, reason)`, `PricingCalculator.calculate(booking, package)`, `AvailabilityFinder.find(professional, range)` |
 | Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
 | Query and persistence for a single aggregate | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()` |
 | Reusable technical logic — no domain concepts, no I/O | **Shared Service** | `IdGenerator`, `Slugifier`, `Clock`, `RetryPolicy` |
@@ -125,22 +128,38 @@ Each piece of logic has exactly one correct home. Getting this wrong is the most
 
 **Decision rule.** Ask, in order:
 
-1. Rule about one entity's own state? → **Entity**.
-2. Validation tied to a single self-contained concept? → **Value Object**.
-3. Touches I/O? → **Infrastructure adapter**, behind an interface.
-4. Generic technical logic with no domain concepts? → **Shared Service**.
-5. Coordinates multiple entities or computes domain rules statelessly? → **Domain Service**.
-6. Single business operation owning a transaction? → **Use Case**.
-7. Storage query? → **Repository**.
+1. Immutable data + construction-time invariants for one concept? → **Entity** or **Value Object** (entity if it has an identity over time; value object if it is defined by its data).
+2. Touches I/O? → **Infrastructure adapter**, behind an interface.
+3. Generic technical logic with no domain concepts? → **Shared Service**.
+4. One operation over domain data (transition, calculation, coordination)? → **Domain Service** — one service per operation, named for what it does.
+5. Single business operation owning a transaction? → **Use Case**.
+6. Storage query? → **Repository**.
+
+**One service = one operation.** A domain service does one thing. `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the wrong shape — split into `BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`. The discipline solves both ends: invariants live in the obvious file, and "what can I do with a `Booking`?" is answered by `ls src/Domain/Booking/`.
 
 **Common misplacements:**
 
-- **Entity coordinating multiple entities.** Entities know about themselves, not their siblings. Move to a **Domain Service**.
+- **Mutating method on an entity** (`booking.confirm()` that changes status in place). Entities are immutable. Replace with a **state-transition service** that takes the entity and returns a new instance with the new state.
+- **God-services** (`BookingManager`, `BookingService` with five methods). The symmetric anti-pattern to god-entities. Split into one service per operation.
 - **Use case calling another use case.** Extract shared logic into a **Domain Service** or repository method; orchestrate from one use case only.
 - **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
 - **Controller branching on domain state.** That is business logic. Move to the **Use Case**.
 - **Domain service touching I/O.** Not a domain service — it is an **Infrastructure adapter** behind an interface, called by a use case.
 - **Shared Service that knows about `Booking`.** If it references domain concepts, it is a **Domain Service**, not shared.
+
+**Colocation.** Each aggregate gets its own folder under `src/Domain/`, holding the entity and every service that operates on it:
+
+```
+src/Domain/
+└── Booking/
+    ├── Booking.php                    # Immutable entity
+    ├── BookingRepositoryInterface.php
+    ├── BookingConfirmer.php           # One service per operation
+    ├── BookingCanceller.php
+    ├── BookingRescheduler.php
+    ├── PricingCalculator.php
+    └── AvailabilityFinder.php
+```
 
 ### Dependency Direction
 
@@ -901,7 +920,7 @@ Over-mocking makes tests brittle — an internal call reorder breaks tests even 
 
 - **Controller tests** stub the use case interface. Assert correct HTTP response.
 - **Use case tests** stub repository/service interfaces. No database, no external calls. Assert business rules. Mock only for critical side effects (payments, external APIs).
-- **Domain tests** need no doubles. Entities and value objects are pure.
+- **Domain tests** need no doubles. Entities and value objects are immutable data; domain services are pure functions over them. Construct, call, assert.
 - **Repository tests** are both: unit tests that stub the data source to cover branching/orchestration logic, *and* integration tests against a real test database that verify the SQL works against the actual schema. Neither replaces the other.
 
 **On repository (and other infrastructure adapter) unit tests.** Repositories, cache adapters, queue adapters, and external API clients contain orchestration logic — null handling, conditional mapping, optional joins, fallback paths — that the 100% coverage requirement makes mandatory to test at the unit level. Integration tests alone cannot economically cover every branch, and the existence of a mapper does not eliminate the orchestration around it. Unit tests on these classes are required, not optional. The rule is what they assert:
