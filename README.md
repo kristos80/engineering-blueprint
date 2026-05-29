@@ -23,6 +23,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 - [Project Structure](#project-structure)
 - [Architecture](#architecture)
   - [Layers](#layers)
+  - [Where Logic Lives](#where-logic-lives)
   - [Dependency Direction](#dependency-direction)
   - [Dependency Injection](#dependency-injection)
   - [File Conventions](#file-conventions)
@@ -74,9 +75,10 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 ## Design Principles
 
 1. **Stateless services.** Any instance can serve any request. Authoritative state lives in the database; tokens carry identity. Long-lived processes may hold *rebuildable* in-memory state (pools, caches) — never authoritative state. Scales horizontally behind a load balancer. See [State in Long-Lived Processes](#state-in-long-lived-processes).
-2. **Transactional.** Every use case that writes data is a single DB transaction — all or nothing.
-3. **Explicit over implicit.** Dependencies are injected, not resolved magically. State is checked, not assumed. Contracts are interfaces, not conventions.
-4. **No premature abstraction.** Three similar lines of code are better than a helper nobody asked for. Add structure when pain arrives, not before.
+2. **Immutable data.** Entities, value objects, DTOs, use cases, controllers — all immutable. No setters, no in-place mutation. Behavior is functions that take immutable input and return new immutable output. State transitions produce new instances; they do not mutate existing ones.
+3. **Transactional.** Every use case that writes data is a single DB transaction — all or nothing.
+4. **Explicit over implicit.** Dependencies are injected, not resolved magically. State is checked, not assumed. Contracts are interfaces, not conventions.
+5. **No premature abstraction.** Three similar lines of code are better than a helper nobody asked for. Add structure when pain arrives, not before.
 
 ## Project Structure
 
@@ -84,8 +86,8 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 src/
 ├── Controller/       # HTTP adapters — receive requests, return responses
 ├── UseCase/          # Application logic — one class per business operation
-├── Domain/           # Entities, value objects, repository interfaces
-├── Shared/           # Common service layer — reusable services with no direct I/O
+├── Domain/           # Entities, value objects, domain services, repository interfaces
+├── Shared/           # Technical utilities reusable across the codebase — no domain concepts, no I/O
 └── Infrastructure/   # Concrete I/O adapters — database, cache, filesystem, APIs
 ```
 
@@ -106,7 +108,50 @@ Controller → UseCase → Repository/Domain
 - **Controllers** handle HTTP (request in, response out). Zero business logic. Request validation, auth context extraction, and error-to-HTTP mapping are OK (adapter logic).
 - **Use cases** orchestrate business operations. One use case = one business operation. Pure application logic — no framework imports, no HTTP concepts.
 - **Repositories** execute queries. Transaction-unaware — they just run SQL.
-- **Domain** contains entities, value objects, and repository interfaces. Zero dependencies on outer layers.
+- **Domain** contains entities, value objects, domain services, and repository interfaces. Zero dependencies on outer layers.
+
+### Where Logic Lives
+
+Logic placement follows two principles from above: data is immutable, and behavior is decomposed by operation. Entities carry data and enforce invariants but have no mutating methods. State transitions, calculations, and multi-entity coordination live in domain services — **one service per operation**, colocated with the aggregate it operates on. This trades language-enforced invariants for explicit data flow, trivial testability, and consistency with the rest of the blueprint's immutable style.
+
+Getting placement wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, repositories that compute business rules, services that turn into god-classes.
+
+| Logic type | Lives in | Examples |
+|------------|----------|----------|
+| Immutable data + invariants enforced in the constructor | **Entity** | `new Booking(...)`, `Booking::createNew(...)`, `Booking::reconstituteFromRow(...)` — no setters, no mutating methods |
+| Self-contained immutable concept with validation and equality | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
+| One operation over domain data — state transition, calculation, or multi-entity coordination | **Domain Service** | `BookingConfirmer.confirm(booking)`, `BookingCanceller.cancel(booking, reason)`, `PricingCalculator.calculate(booking, package)`, `AvailabilityFinder.find(professional, range)` |
+| Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
+| Query and persistence for a single aggregate | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()` |
+| Reusable technical logic — no domain concepts, no I/O | **Shared Service** | `IdGenerator`, `Slugifier`, `Clock`, `RetryPolicy` |
+| I/O against external systems | **Infrastructure adapter** (behind an interface) | `RedisCacheAdapter`, `BillingProviderApiClient`, `SqsQueueAdapter` |
+
+**Decision rule.** Ask, in order:
+
+1. Immutable data + construction-time invariants for one concept? → **Entity** or **Value Object** (entity if it has an identity over time; value object if it is defined by its data).
+2. Touches I/O? → **Infrastructure adapter**, behind an interface.
+3. Generic technical logic with no domain concepts? → **Shared Service**.
+4. One operation over domain data (transition, calculation, coordination)? → **Domain Service** — one service per operation, named for what it does.
+5. Single business operation owning a transaction? → **Use Case**.
+6. Storage query? → **Repository**.
+
+**One service = one operation.** A domain service does one thing. `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the wrong shape — split into `BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`. The discipline solves both ends: invariants live in the obvious file, and "what can I do with a `Booking`?" is answered by `ls src/Domain/Booking/`.
+
+For misplacement anti-patterns (mutating entities, god-services, repositories computing rules, controllers branching on domain state, domain services touching I/O, shared services holding domain concepts), see [Anti-Patterns → Architecture](#anti-patterns).
+
+**Colocation.** Each aggregate gets its own folder under `src/Domain/`, holding the entity and every service that operates on it:
+
+```
+src/Domain/
+└── Booking/
+    ├── Booking.php                    # Immutable entity
+    ├── BookingRepositoryInterface.php
+    ├── BookingConfirmer.php           # One service per operation
+    ├── BookingCanceller.php
+    ├── BookingRescheduler.php
+    ├── PricingCalculator.php
+    └── AvailabilityFinder.php
+```
 
 ### Dependency Direction
 
@@ -867,7 +912,7 @@ Over-mocking makes tests brittle — an internal call reorder breaks tests even 
 
 - **Controller tests** stub the use case interface. Assert correct HTTP response.
 - **Use case tests** stub repository/service interfaces. No database, no external calls. Assert business rules. Mock only for critical side effects (payments, external APIs).
-- **Domain tests** need no doubles. Entities and value objects are pure.
+- **Domain tests** need no doubles. Entities and value objects are immutable data; domain services are pure functions over them. Construct, call, assert.
 - **Repository tests** are both: unit tests that stub the data source to cover branching/orchestration logic, *and* integration tests against a real test database that verify the SQL works against the actual schema. Neither replaces the other.
 
 **On repository (and other infrastructure adapter) unit tests.** Repositories, cache adapters, queue adapters, and external API clients contain orchestration logic — null handling, conditional mapping, optional joins, fallback paths — that the 100% coverage requirement makes mandatory to test at the unit level. Integration tests alone cannot economically cover every branch, and the existence of a mapper does not eliminate the orchestration around it. Unit tests on these classes are required, not optional. The rule is what they assert:
@@ -968,10 +1013,14 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 
 ### Architecture
 
-- **Use cases calling other use cases.** Creates implicit dependency graphs, hidden transactions, and untestable nesting. Extract shared logic into a repository method or domain service; orchestrate from one use case only.
+- **Use cases calling other use cases.** Creates implicit dependency graphs, hidden transactions, and untestable nesting. Extract shared logic into a domain service or repository method; orchestrate from one use case only.
 - **Business logic in controllers.** Controllers parse, validate, delegate, format. Branching on domain state, computing totals, deciding what to persist — all belong in the use case.
+- **Mutating methods on an entity.** Entities are immutable (see [Design Principles](#design-principles)). State transitions are domain services that take the entity and return a new instance — never `booking.confirm()` mutating in place.
+- **God-services / multi-operation domain services.** `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the symmetric anti-pattern to god-entities. Split into one service per operation (`BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`).
 - **Repository-to-repository calls.** Repositories are query executors, not orchestrators. Cross-entity coordination happens in the use case.
+- **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
 - **Domain objects performing I/O.** No HTTP calls, queue dispatches, or filesystem writes from entities, value objects, or domain services. Side effects live behind interfaces, invoked from use cases.
+- **Shared Service holding domain concepts.** If a class in `Shared/` references `Booking` or any domain type, it is a **Domain Service**, not shared. `Shared/` is for technical utilities with no domain knowledge.
 - **Framework types in the domain.** Use cases and entities import nothing framework-specific. HTTP requests stop at the controller. ORM models do not exist — repositories return domain objects, not framework rows.
 
 ### Dependencies
