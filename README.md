@@ -137,15 +137,7 @@ Getting placement wrong is the most common cause of architectural drift — use 
 
 **One service = one operation.** A domain service does one thing. `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the wrong shape — split into `BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`. The discipline solves both ends: invariants live in the obvious file, and "what can I do with a `Booking`?" is answered by `ls src/Domain/Booking/`.
 
-**Common misplacements:**
-
-- **Mutating method on an entity** (`booking.confirm()` that changes status in place). Entities are immutable. Replace with a **state-transition service** that takes the entity and returns a new instance with the new state.
-- **God-services** (`BookingManager`, `BookingService` with five methods). The symmetric anti-pattern to god-entities. Split into one service per operation.
-- **Use case calling another use case.** Extract shared logic into a **Domain Service** or repository method; orchestrate from one use case only.
-- **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
-- **Controller branching on domain state.** That is business logic. Move to the **Use Case**.
-- **Domain service touching I/O.** Not a domain service — it is an **Infrastructure adapter** behind an interface, called by a use case.
-- **Shared Service that knows about `Booking`.** If it references domain concepts, it is a **Domain Service**, not shared.
+For misplacement anti-patterns (mutating entities, god-services, repositories computing rules, controllers branching on domain state, domain services touching I/O, shared services holding domain concepts), see [Anti-Patterns → Architecture](#anti-patterns).
 
 **Colocation.** Each aggregate gets its own folder under `src/Domain/`, holding the entity and every service that operates on it:
 
@@ -1021,10 +1013,14 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 
 ### Architecture
 
-- **Use cases calling other use cases.** Creates implicit dependency graphs, hidden transactions, and untestable nesting. Extract shared logic into a repository method or domain service; orchestrate from one use case only.
+- **Use cases calling other use cases.** Creates implicit dependency graphs, hidden transactions, and untestable nesting. Extract shared logic into a domain service or repository method; orchestrate from one use case only.
 - **Business logic in controllers.** Controllers parse, validate, delegate, format. Branching on domain state, computing totals, deciding what to persist — all belong in the use case.
+- **Mutating methods on an entity.** Entities are immutable (see [Design Principles](#design-principles)). State transitions are domain services that take the entity and return a new instance — never `booking.confirm()` mutating in place.
+- **God-services / multi-operation domain services.** `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the symmetric anti-pattern to god-entities. Split into one service per operation (`BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`).
 - **Repository-to-repository calls.** Repositories are query executors, not orchestrators. Cross-entity coordination happens in the use case.
+- **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
 - **Domain objects performing I/O.** No HTTP calls, queue dispatches, or filesystem writes from entities, value objects, or domain services. Side effects live behind interfaces, invoked from use cases.
+- **Shared Service holding domain concepts.** If a class in `Shared/` references `Booking` or any domain type, it is a **Domain Service**, not shared. `Shared/` is for technical utilities with no domain knowledge.
 - **Framework types in the domain.** Use cases and entities import nothing framework-specific. HTTP requests stop at the controller. ORM models do not exist — repositories return domain objects, not framework rows.
 
 ### Dependencies
