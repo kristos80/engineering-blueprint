@@ -989,7 +989,7 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 ### Testing
 
 - **Mocks where stubs suffice.** Mocks signal "the side effect *is* the behavior being verified." Stubs signal "this is a placeholder." Default to stubs.
-- **Unit-testing infrastructure adapters with mocks.** Repository tests hit a real database. Cache and queue adapters get integration tests. See [Infrastructure Integration Tests](#infrastructure-integration-tests).
+- **Mocking the database driver to "unit test" a repository.** That asserts SQL strings and driver calls, not behavior — the SQL can be wrong and the test still passes. Repository tests run against a real DB. If hydration logic is complex enough to warrant isolated tests (null handling, type coercion, JSON deserialization), extract it to a mapper — the mapper gets unit tests, the repository gets integration tests. Same rule for cache and queue adapters. See [Infrastructure Integration Tests](#infrastructure-integration-tests).
 - **Tests coupled to implementation.** Test names describe behavior, not method calls. Renaming a private method must not break a test.
 
 ### Process
