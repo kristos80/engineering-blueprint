@@ -23,6 +23,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 - [Project Structure](#project-structure)
 - [Architecture](#architecture)
   - [Layers](#layers)
+  - [Where Logic Lives](#where-logic-lives)
   - [Dependency Direction](#dependency-direction)
   - [Dependency Injection](#dependency-injection)
   - [File Conventions](#file-conventions)
@@ -84,8 +85,8 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 src/
 ├── Controller/       # HTTP adapters — receive requests, return responses
 ├── UseCase/          # Application logic — one class per business operation
-├── Domain/           # Entities, value objects, repository interfaces
-├── Shared/           # Common service layer — reusable services with no direct I/O
+├── Domain/           # Entities, value objects, domain services, repository interfaces
+├── Shared/           # Technical utilities reusable across the codebase — no domain concepts, no I/O
 └── Infrastructure/   # Concrete I/O adapters — database, cache, filesystem, APIs
 ```
 
@@ -106,7 +107,40 @@ Controller → UseCase → Repository/Domain
 - **Controllers** handle HTTP (request in, response out). Zero business logic. Request validation, auth context extraction, and error-to-HTTP mapping are OK (adapter logic).
 - **Use cases** orchestrate business operations. One use case = one business operation. Pure application logic — no framework imports, no HTTP concepts.
 - **Repositories** execute queries. Transaction-unaware — they just run SQL.
-- **Domain** contains entities, value objects, and repository interfaces. Zero dependencies on outer layers.
+- **Domain** contains entities, value objects, domain services, and repository interfaces. Zero dependencies on outer layers.
+
+### Where Logic Lives
+
+Each piece of logic has exactly one correct home. Getting this wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, repositories that compute business rules.
+
+| Logic type | Lives in | Examples |
+|------------|----------|----------|
+| Rules about a single entity's state or invariants | **Entity** | `Booking.confirm()`, `Booking.canBeCancelled()`, `User.changePassword()` |
+| Validation and behavior for a self-contained concept | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
+| Stateless calculation or coordination across multiple entities | **Domain Service** | `PricingService.calculate(booking, package, discounts)`, `AvailabilityService.findSlots(professional, range)` |
+| Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
+| Query and persistence for a single aggregate | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()` |
+| Reusable technical logic — no domain concepts, no I/O | **Shared Service** | `IdGenerator`, `Slugifier`, `Clock`, `RetryPolicy` |
+| I/O against external systems | **Infrastructure adapter** (behind an interface) | `RedisCacheAdapter`, `BillingProviderApiClient`, `SqsQueueAdapter` |
+
+**Decision rule.** Ask, in order:
+
+1. Rule about one entity's own state? → **Entity**.
+2. Validation tied to a single self-contained concept? → **Value Object**.
+3. Touches I/O? → **Infrastructure adapter**, behind an interface.
+4. Generic technical logic with no domain concepts? → **Shared Service**.
+5. Coordinates multiple entities or computes domain rules statelessly? → **Domain Service**.
+6. Single business operation owning a transaction? → **Use Case**.
+7. Storage query? → **Repository**.
+
+**Common misplacements:**
+
+- **Entity coordinating multiple entities.** Entities know about themselves, not their siblings. Move to a **Domain Service**.
+- **Use case calling another use case.** Extract shared logic into a **Domain Service** or repository method; orchestrate from one use case only.
+- **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
+- **Controller branching on domain state.** That is business logic. Move to the **Use Case**.
+- **Domain service touching I/O.** Not a domain service — it is an **Infrastructure adapter** behind an interface, called by a use case.
+- **Shared Service that knows about `Booking`.** If it references domain concepts, it is a **Domain Service**, not shared.
 
 ### Dependency Direction
 
