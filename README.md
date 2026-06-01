@@ -524,63 +524,23 @@ Neither layer alone is sufficient: local guard misses "DB write failed after ven
 
 ### Concurrency Control
 
-State guards and idempotency handle "the same operation tries to run twice." Concurrency control handles "two different operations try to mutate the same row at the same time." The blueprint's stance: **prefer database constraints over application-level checks**. Constraints fail closed; application checks have race windows.
+State guards and idempotency handle "the same operation tries to run twice." Concurrency control handles "two operations try to commit conflicting changes." The mechanism depends on operation type, not scenario:
 
-**Decision rule:**
+| Operation | Concurrency mechanism | Why |
+|-----------|----------------------|-----|
+| **Create** — insert a unique-once row (payment, booking, user) | Idempotency key (in the use case) + **unique constraint** (in the DB) | The record is created once and rarely mutated afterwards. Idempotency stops the duplicate request before it reaches the DB; the constraint catches the race that slips past. No locking needed — the constraint serializes the inserts. |
+| **Update — critical** — financial state transitions, scarce-resource allocation, anything where retry is hard to recover from | **Pessimistic locking** — `SELECT ... FOR UPDATE` | First writer wins, second waits and sees the new state. Deterministic. No retry semantics to get wrong. |
+| **Update — non-critical** — post edits, profile updates, settings | **Optimistic locking** — version column with bounded retry | Same first-wins semantics, cheaper at low contention. Acceptable because a "please retry" outcome is recoverable for user-editable resources. |
 
-| Scenario | Mechanism |
-|----------|-----------|
-| Two writers may modify the same row; the loser should retry or surface a conflict | **Optimistic locking** — version column on the row |
-| A workflow must serialize access to a row across multiple statements | **Pessimistic locking** — `SELECT ... FOR UPDATE` inside the transaction |
-| Two creators may produce a duplicate record (booking the same slot, claiming the same email) | **Unique constraint** on the column(s) that define uniqueness |
-| The same logical operation may retry | Idempotency (see [State Guards & Idempotency](#state-guards--idempotency)) — not concurrency |
+**Universal rule for updates:** first writer wins; second fails or retries. Pessimistic and optimistic locking produce the same outcome — pessimistic is deterministic, optimistic is cheaper but spurious-failure-prone. Pick by criticality, not by taste.
 
-#### Optimistic locking
+**Universal rule for creates:** idempotency + unique constraint. No locking. Payments, bookings, and other "create-once" records flow through this pair every time.
 
-A `version` column on the row. Reads include the version; writes require it to match. If another writer incremented the version in between, the update affects zero rows and the operation retries or surfaces a conflict.
+The blueprint's stance: **prefer database constraints and locks over application-level checks**. Constraints fail closed; application checks have race windows. Application checks may run alongside for friendlier error messages but are never the source of truth.
 
-```
-// bookings table has a `version INT NOT NULL DEFAULT 0` column
-booking = bookingRepository.findById(id)
+#### Unique constraints — the create-side guard
 
-// ... domain transformation ...
-confirmed = bookingConfirmer.confirm(booking)
-
-affected = connection.execute(
-    "UPDATE bookings SET status = ?, version = version + 1
-     WHERE id = ? AND version = ?",
-    [confirmed.status, confirmed.id, booking.version]
-)
-
-if affected == 0
-    throw OptimisticLockException()
-```
-
-- Use when conflicts are rare and retries are cheap.
-- The retry loop lives in the use case, not the repository — the use case owns the transaction and decides whether to retry, refresh, or surface a 409 Conflict.
-- The repository raises a typed exception on zero affected rows; it does not retry on its own.
-
-#### Pessimistic locking
-
-`SELECT ... FOR UPDATE` inside a transaction. Holds a row-level lock until commit or rollback. Other transactions trying to acquire the same lock wait.
-
-```
-return transaction.run(() =>
-    // Lock the row for the duration of this transaction
-    booking = bookingRepository.findByIdForUpdate(id)
-    confirmed = bookingConfirmer.confirm(booking)
-    bookingRepository.save(confirmed)
-    return confirmed
-)
-```
-
-- Use when contention is expected (hot rows, financial flows where retries are expensive or undesirable).
-- Use sparingly — locks block other transactions and introduce deadlock risk. Always inside a transaction with a short, clear scope.
-- Expose locking intent at the repository interface (`findByIdForUpdate`) — never as a hidden side effect of a regular `findById`.
-
-#### Unique constraints
-
-The strongest guard: the database refuses to insert a duplicate. No race window, no application logic to forget.
+The strongest guard for create operations: the database refuses to insert a duplicate. No race window, no application logic to forget.
 
 ```sql
 ALTER TABLE bookings
@@ -601,8 +561,52 @@ catch UniqueConstraintViolationException(constraint: "unique_slot")
 
 - One constraint = one named exception = one HTTP response shape (typically 409 Conflict).
 - Catch only the specific constraint by name; rethrow others — never swallow a generic constraint violation.
+- Pair with idempotency in the use case (see [State Guards & Idempotency](#state-guards--idempotency)). The idempotency key handles the duplicate request; the constraint handles the rare race that slips past.
 
-#### Why constraints over application checks
+#### Pessimistic locking — the default update-side guard
+
+`SELECT ... FOR UPDATE` inside a transaction. Holds a row-level lock until commit or rollback. Other transactions trying to acquire the same lock wait.
+
+```
+return transaction.run(() =>
+    // Lock the row for the duration of this transaction
+    booking = bookingRepository.findByIdForUpdate(id)
+    confirmed = bookingConfirmer.confirm(booking)
+    bookingRepository.save(confirmed)
+    return confirmed
+)
+```
+
+- **Default for updates.** Critical flows (financial state transitions, scarce-resource allocation) should use this. The cost of holding a short lock is almost always less than the cost of getting the retry logic wrong.
+- Always inside a transaction with a short, clear scope. Long-held locks introduce deadlock risk.
+- Expose locking intent at the repository interface (`findByIdForUpdate`) — never as a hidden side effect of a regular `findById`.
+
+#### Optimistic locking — the cheap update-side guard
+
+Only for non-critical, user-editable resources where a "please retry" outcome is acceptable. A `version` column on the row; reads include the version, writes require it to match. If another writer incremented the version in between, the update affects zero rows.
+
+```
+// bookings table has a `version INT NOT NULL DEFAULT 0` column
+booking = bookingRepository.findById(id)
+
+// ... domain transformation ...
+edited = bookingEditor.applyChanges(booking, changes)
+
+affected = connection.execute(
+    "UPDATE bookings SET notes = ?, version = version + 1
+     WHERE id = ? AND version = ?",
+    [edited.notes, edited.id, booking.version]
+)
+
+if affected == 0
+    throw OptimisticLockException()
+```
+
+- **Not for financial flows, slot allocation, or anything where conflict recovery is hard.** Use pessimistic locking instead.
+- The use case owns retry policy: typically 1–3 attempts with brief backoff, then surface a 409 Conflict. Unbounded retry is an outage waiting to happen.
+- The repository raises a typed exception on zero affected rows; it does not retry on its own.
+
+#### Why constraints and locks beat application checks
 
 The naive pattern has a race window:
 
@@ -613,9 +617,9 @@ if bookingRepository.slotIsTaken(slot)
 bookingRepository.create(booking)
 ```
 
-Both requests pass the check in the same instant, both reach `create`, and both succeed. The window is small but real, and at any non-trivial scale it will happen. A unique constraint eliminates the window — the database serializes the two inserts and one fails.
+Both requests pass the check in the same instant, both reach `create`, and both succeed. The window is small but real, and at any non-trivial scale it will happen. A unique constraint eliminates the window — the database serializes the two inserts and one fails. The same logic applies to updates: a `findById` followed by a conditional `save` without locking or a version check has the same race window as the create example above.
 
-**Rule:** if a uniqueness or sequencing invariant exists in the domain, encode it as a database constraint. Application checks may run alongside for friendlier error messages, but they are never the source of truth.
+**Rule:** if a uniqueness or sequencing invariant exists in the domain, encode it in the database — as a constraint (for creates) or a lock (for updates). Application checks may run alongside for friendlier error messages, but they are never the source of truth.
 
 ### Data Evolution Safety
 
