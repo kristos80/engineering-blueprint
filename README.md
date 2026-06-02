@@ -43,7 +43,6 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
 - [Reliability](#reliability)
   - [Side Effects](#side-effects)
   - [Event System](#event-system)
-  - [Critical Flows](#critical-flows)
   - [State Guards & Idempotency](#state-guards--idempotency)
   - [Concurrency Control](#concurrency-control)
   - [Data Evolution Safety](#data-evolution-safety)
@@ -408,28 +407,26 @@ Request → AuthMiddleware (extract JWT, attach user context, check role) → Co
 
 ### Side Effects
 
-When a use case has work beyond its core operation — sending email, recording analytics, syncing a calendar, charging a card, dispatching SMS — pick the mechanism by **delivery guarantee** and **runtime**, not by familiarity:
+When a use case has work beyond its core operation — sending email, recording analytics, syncing a calendar, charging a card, dispatching SMS, coordinating multiple writes across systems — three mechanisms cover everything:
 
 | Situation | Mechanism |
 |-----------|-----------|
-| Must succeed for the operation to succeed (the caller gets a 4xx/5xx if it fails) | **Synchronous call** in the same use case and transaction. Not async at all. |
-| In-request, fire-and-forget where loss is acceptable (analytics ping, in-process audit log, cache warm) | **In-process event** (see [Event System](#event-system)) |
-| Must eventually succeed, may take time, must survive a crash, may need retry (transactional email, calendar sync, downstream API call) | **Queued job** (see [Background Jobs & Queues](#background-jobs--queues)) |
-| Multi-step operation where partial completion must be recoverable on restart (booking + payment + provisioning) | **Flow tracker** (see [Critical Flows](#critical-flows)) |
-| Cross-service communication between deployable units | External event bus / message broker — out of scope for a single-app blueprint. A queued job is the right starting point until you have multiple services. |
+| Must succeed for the operation to succeed. Inside the transaction: **DB reads/writes only** — external calls cannot be rolled back. If an external call must complete in this request, the operation is multi-step (commit DB, then external call as a queued job) | **Synchronous call** |
+| In-request, fire-and-forget where loss is acceptable (analytics ping, in-process audit log, cache warm). One action, OK if it fails | **In-process event** (see [Event System](#event-system)) |
+| Must eventually succeed. Anything else — external calls, long-running work, multi-step coordination across systems | **Queued job** (see [Background Jobs & Queues](#background-jobs--queues)) |
 
-**The key axes:** retry semantics and persistence.
+**One async mechanism.** Everything async goes through the queue. A payload (with a `type` and `version`) is enqueued. A **handler** — code that knows what to do with that payload type and version — picks it up, performs the work, and either succeeds or retries up to a threshold. The blueprint does *not* provide a separate "flow execution" mechanism for multi-step jobs. Multi-step coordination, step skipping on retry, and progress tracking are responsibilities of the handler, expressed in its own domain logic — typically by writing idempotently against domain tables that naturally record progress (the product row, the search-engine document, a `notifications` row). This is a deliberate choice: generic flow/workflow frameworks trade flexibility for complexity that most apps do not need, which is exactly the trade [the blueprint opposes](#on-frameworks).
 
-- **Sync call** — strongest guarantee. If the side effect fails, the whole operation fails and the caller knows.
-- **Events** — no persistence, no retry. In-process function calls with a dispatcher. If the listener throws, the side effect is lost.
-- **Queues** — persisted in the DB, retried on failure, survive restarts. Use when the side effect must eventually succeed.
-- **Flow tracker** — a queue plus a coordination protocol. Each step records its completion so a worker resuming after a crash knows where to continue.
+**Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record already exist?", "have we already notified for this?") before acting. Not every handler needs it; trivial jobs that run once may not. The handler decides.
+
+**Retry threshold.** Every job has a maximum attempt count after which it stops retrying and surfaces as failed for operator attention. Where the threshold lives — in the jobs table, in the handler — is an implementation choice; both work.
 
 **Anti-patterns:**
 
 - **Using events for things that must succeed.** "Send the confirmation email" via an event silently loses messages if the listener throws. Use a queued job.
-- **Using queues for things that must happen in this request.** Charging a card via a queued job means the caller gets a 200 OK before payment confirms. Use a synchronous call.
-- **Building flow logic on events.** An event dispatcher is not a workflow engine. Multi-step operations with recovery requirements go in the flow tracker.
+- **Using queues for things that must happen in this request.** Charging a card via a queued job means the caller gets a 200 OK before payment confirms. Use a synchronous call (after commit, with idempotency on the external side).
+- **External calls inside a transaction.** Email, SMS, webhooks, payments — none of these can be rolled back by `ROLLBACK`. They happen after commit, not inside it.
+- **Building a generic flow framework on top of the queue.** A workflow engine is the kind of generic abstraction the blueprint opposes. If steps need coordination, the handler does it in code against domain tables — not via a separate flow-execution table.
 
 ### Event System
 
@@ -449,46 +446,6 @@ dispatcher.dispatch("booking.created", booking)
 - Pass typed event objects when the payload gets complex: `dispatch("booking.created", new BookingCreated(id))`
 - Inject the dispatcher interface into use cases via DI
 
-### Critical Flows
-
-For multistep operations where partial completion is unacceptable, use a **flow execution tracker** — a database table that records progress through steps. If the process crashes or a step fails, you know exactly where it stopped and can resume.
-
-Examples: payment + booking, multiservice provisioning, onboarding workflows with external API calls.
-
-```
-flow_executions
-├── id
-├── type           -- "payment_booking", "professional_onboarding", etc.
-├── version        -- flow definition version (for safe evolution)
-├── reference_id   -- contextual UUID
-├── steps          -- {"step_1": "completed", "step_2": "completed", "step_3": "pending"}
-├── status         -- running | completed | failed
-├── created_at
-└── updated_at
-```
-
-**Sequential within a flow, concurrent across flows.** Steps within one flow run in order (step 1 → 2 → 3). Multiple workers process different flows simultaneously.
-
-```sql
--- Worker picks up a stuck flow — row lock prevents double-processing
-SELECT * FROM flow_executions
-WHERE status = 'running'
-AND updated_at < NOW() - INTERVAL 5 MINUTE
-FOR UPDATE SKIP LOCKED
-LIMIT 1;
-```
-
-- `FOR UPDATE` locks the row — no other worker can grab it
-- `SKIP LOCKED` — other workers don't wait, they grab the next available row
-- `updated_at` acts as a heartbeat — worker updates it as it progresses through steps
-- If a worker crashes, the row goes stale, another worker picks it up and resumes from the last completed step
-
-**What goes through flow execution:** any multistep operation where partial completion causes data integrity issues (e.g., payment charged but booking not created).
-
-**What does NOT:** SMS, notifications, emails, analytics — these go through the event system with a queue for retry. A failed notification is an ops issue, not a data integrity issue.
-
-**Flow versioning:** step sequences are defined in code per version. New flows get the current version. In-progress flows complete with the version they started with. Old version code stays until all flows of that version are completed.
-
 ### State Guards & Idempotency
 
 **Guard on state, not on history.** Don't assume a previous step ran — check the entity's current state before allowing an operation:
@@ -504,7 +461,7 @@ function ship(order: Order): void
         throw InvalidOrderStateException("Cannot ship unpaid order")
 ```
 
-State guards on entities enforce valid transitions. The flow tracker records which steps completed. Together they prevent both "step was skipped" and "step ran out of order."
+State guards on entities enforce valid transitions. The handler records which steps completed — typically as idempotent writes against domain tables (the row exists, the document is indexed, the notification was logged). Together they prevent both "step was skipped" and "step ran out of order."
 
 **Idempotent operations.** Any step that might be retried (by a worker resuming a flow, a queue redelivering a job, or a user double-clicking) must produce the same result when called twice:
 
@@ -520,7 +477,7 @@ function charge(orderId: String, amount: Int): void
     paymentProvider.charge(orderId, amount)
 ```
 
-This matters for the flow tracker — a worker resumes from the last incomplete step, but the step may have completed while the status update didn't persist. The step runs again and must be safe to repeat.
+This matters for any retried job — a worker may re-execute a step that already completed but whose completion did not persist. Re-runs must be safe.
 
 **Third-party idempotency — defense in depth.** For external vendor calls (payments, SMS, etc.), use two layers:
 
@@ -603,7 +560,7 @@ return transaction.run(() =>
 )
 ```
 
-- **Default for updates.** Critical flows (financial state transitions, scarce-resource allocation) should use this. The cost of holding a short lock is almost always less than the cost of getting the retry logic wrong.
+- **Default for updates.** Critical operations (financial state transitions, scarce-resource allocation) should use this. The cost of holding a short lock is almost always less than the cost of getting the retry logic wrong.
 - Always inside a transaction with a short, clear scope. Long-held locks introduce deadlock risk.
 - Expose locking intent at the repository interface (`findByIdForUpdate`) — never as a hidden side effect of a regular `findById`.
 
@@ -762,13 +719,13 @@ No single layer is sufficient alone. The deserializer centralizes the logic. The
 
 ### Background Jobs & Queues
 
-Database-backed queue. No external queue dependency until load requires it.
+Database-backed queue. No external queue dependency until load requires it. This is the single async mechanism for the whole app — see [Side Effects](#side-effects) for the framing.
 
 ```
 jobs
 ├── id
-├── type            -- "send_sms", "sync_calendar", etc.
-├── payload         -- JSON with version field
+├── type            -- "send_sms", "product_sync", "professional_onboarding", etc.
+├── payload         -- JSON with a `version` field
 ├── status          -- pending | processing | completed | failed
 ├── attempts        -- retry count
 ├── max_attempts    -- per job type
@@ -777,7 +734,9 @@ jobs
 └── updated_at
 ```
 
-Workers use the same pattern as the flow tracker:
+**Payload + handler.** A job is a `type` and a versioned `payload`. The dispatcher routes by `(type, version)` to a **handler** — the code that performs the work for that payload shape. Multi-step coordination, step skipping on retry, and progress tracking are the handler's responsibility, expressed in its own domain logic. The blueprint does not provide a generic flow/workflow framework — that flexibility-for-complexity trade is exactly what [the blueprint opposes](#on-frameworks).
+
+**Worker claim pattern.** Workers claim jobs with row-level locking that other workers skip:
 
 ```sql
 SELECT * FROM jobs
@@ -787,10 +746,15 @@ FOR UPDATE SKIP LOCKED
 LIMIT 1;
 ```
 
-- Event listeners can dispatch to the queue for async processing
-- Failed jobs retry with exponential backoff (e.g., 1min, 5min, 30min)
-- After `max_attempts`, mark as failed — surface in admin/monitoring
-- Job handlers must be idempotent (same job may run twice)
+- `FOR UPDATE` locks the row — no other worker can grab it.
+- `SKIP LOCKED` — other workers don't wait, they grab the next available row.
+- Event listeners can dispatch to the queue for async processing.
+- Failed jobs retry with exponential backoff (e.g., 1min, 5min, 30min).
+- After `max_attempts`, the job is marked failed — surface in admin/monitoring for operator attention.
+
+**Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record exist?", "have we already notified?") before acting. The handler decides what needs guarding; trivial jobs that run once may not need it.
+
+**Versioning.** Handler code is selected by `(type, version)`. New jobs use the current version. In-flight jobs of an older version complete with the handler that matches their version. Old handler code stays until no jobs of that version remain.
 
 ### Database Strategy
 
