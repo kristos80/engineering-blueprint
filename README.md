@@ -41,6 +41,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [API Versioning](#api-versioning)
   - [Rate Limiting](#rate-limiting)
 - [Reliability](#reliability)
+  - [Side Effects](#side-effects)
   - [Event System](#event-system)
   - [Critical Flows](#critical-flows)
   - [State Guards & Idempotency](#state-guards--idempotency)
@@ -404,6 +405,31 @@ Request → AuthMiddleware (extract JWT, attach user context, check role) → Co
 - Return `429 Too Many Requests` with `Retry-After` header.
 
 ## Reliability
+
+### Side Effects
+
+When a use case has work beyond its core operation — sending email, recording analytics, syncing a calendar, charging a card, dispatching SMS — pick the mechanism by **delivery guarantee** and **runtime**, not by familiarity:
+
+| Situation | Mechanism |
+|-----------|-----------|
+| Must succeed for the operation to succeed (the caller gets a 4xx/5xx if it fails) | **Synchronous call** in the same use case and transaction. Not async at all. |
+| In-request, fire-and-forget where loss is acceptable (analytics ping, in-process audit log, cache warm) | **In-process event** (see [Event System](#event-system)) |
+| Must eventually succeed, may take time, must survive a crash, may need retry (transactional email, calendar sync, downstream API call) | **Queued job** (see [Background Jobs & Queues](#background-jobs--queues)) |
+| Multi-step operation where partial completion must be recoverable on restart (booking + payment + provisioning) | **Flow tracker** (see [Critical Flows](#critical-flows)) |
+| Cross-service communication between deployable units | External event bus / message broker — out of scope for a single-app blueprint. A queued job is the right starting point until you have multiple services. |
+
+**The key axes:** retry semantics and persistence.
+
+- **Sync call** — strongest guarantee. If the side effect fails, the whole operation fails and the caller knows.
+- **Events** — no persistence, no retry. In-process function calls with a dispatcher. If the listener throws, the side effect is lost.
+- **Queues** — persisted in the DB, retried on failure, survive restarts. Use when the side effect must eventually succeed.
+- **Flow tracker** — a queue plus a coordination protocol. Each step records its completion so a worker resuming after a crash knows where to continue.
+
+**Anti-patterns:**
+
+- **Using events for things that must succeed.** "Send the confirmation email" via an event silently loses messages if the listener throws. Use a queued job.
+- **Using queues for things that must happen in this request.** Charging a card via a queued job means the caller gets a 200 OK before payment confirms. Use a synchronous call.
+- **Building flow logic on events.** An event dispatcher is not a workflow engine. Multi-step operations with recovery requirements go in the flow tracker.
 
 ### Event System
 
