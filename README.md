@@ -49,6 +49,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Backward Compatibility Testing](#backward-compatibility-testing)
 - [Infrastructure](#infrastructure)
   - [Background Jobs & Queues](#background-jobs--queues)
+    - [Step Completion Tracking](#step-completion-tracking)
   - [Database Strategy](#database-strategy)
   - [Caching](#caching)
   - [Logging & Observability](#logging--observability)
@@ -754,6 +755,67 @@ LIMIT 1;
 - After `max_attempts`, the job is marked failed — surface in admin/monitoring for operator attention.
 
 **Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record exist?", "have we already notified?") before acting. The handler decides what needs guarding; trivial jobs that run once may not need it.
+
+#### Step Completion Tracking
+
+When a handler has multiple steps that must be skippable on retry, two approaches work.
+
+**Default: domain-table tracking.** Check domain state before each step — *the product row exists*, *the search-engine document is there*, *a row in the existing `notifications` table records the send*. Simplest when the domain naturally records progress. No extra tables, no extra abstraction.
+
+**Recommended pattern when the domain does not express progress:** a thin step-completion helper table.
+
+```
+job_step_completions
+├── id
+├── job_id           -- FK to jobs.id, ON DELETE CASCADE
+├── step_name        -- "upsert_product", "index_in_search", "notify_owner"
+├── completed_at
+└── UNIQUE (job_id, step_name)
+```
+
+A small helper exposes two operations to handlers:
+
+```
+interface JobStepTracker
+    function markCompleted(jobId: Int, stepName: String): void
+    function isCompleted(jobId: Int, stepName: String): bool
+```
+
+Handlers gate their own steps:
+
+```
+class ProductSyncHandler
+    function handle(job: Job): void
+        if not steps.isCompleted(job.id, "upsert_product")
+            productRepository.upsert(job.payload["product"])
+            steps.markCompleted(job.id, "upsert_product")
+
+        if not steps.isCompleted(job.id, "index_in_search")
+            searchEngine.upsert(productId, ...)
+            steps.markCompleted(job.id, "index_in_search")
+
+        if shouldNotify(job.payload) and not steps.isCompleted(job.id, "notify_owner")
+            notifier.notify(...)
+            steps.markCompleted(job.id, "notify_owner")
+```
+
+**When to reach for the helper table:**
+
+- A step has no natural domain footprint (e.g., a one-off external API call that the domain does not otherwise log).
+- Cross-handler ops visibility matters — `SELECT job_id FROM job_step_completions WHERE step_name = 'notify_owner'` answers "where did jobs stall?" in one place.
+- The team wants a consistent shape for step tracking across handlers.
+
+**When NOT to use it:**
+
+- The domain already records each step's completion. Parallel tracking is two sources of truth; they will drift.
+- Single-step jobs with no internal checkpoints — overkill.
+
+**Rules:**
+
+- `UNIQUE (job_id, step_name)` is load-bearing. `markCompleted` is implemented as `INSERT ... ON CONFLICT DO NOTHING` so double-calls are harmless.
+- Step **names**, not numbers — `"notify_owner"` is self-documenting in ops queries; `step_number = 3` requires reading handler code.
+- `ON DELETE CASCADE` on `job_id` — when a job row is deleted, its step records go with it.
+- This is *not* a workflow engine. No step ordering, no DAG resolution, no automatic resumption, no per-step status, no heartbeat. The handler still owns the order and the conditions; the table is just a memory aid the handler queries.
 
 **Versioning.** `version` lives as its own column alongside `type`, not inside the payload JSON. The dispatcher routes by `(type, version)` to the handler matching that pair. When a handler contract changes, bump the version and add the new handler; the old handler stays in code until no jobs of the old version remain. **In-flight payloads are never migrated** — they complete under the contract they were enqueued under; migrating live work in place is the kind of "clever" that produces 3 AM incidents.
 
