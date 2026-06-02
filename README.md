@@ -415,7 +415,7 @@ When a use case has work beyond its core operation — sending email, recording 
 | In-request, fire-and-forget where loss is acceptable (analytics ping, in-process audit log, cache warm). One action, OK if it fails | **In-process event** (see [Event System](#event-system)) |
 | Must eventually succeed. Anything else — external calls, long-running work, multi-step coordination across systems | **Queued job** (see [Background Jobs & Queues](#background-jobs--queues)) |
 
-**One async mechanism.** Everything async goes through the queue. A payload (with a `type` and `version`) is enqueued. A **handler** — code that knows what to do with that payload type and version — picks it up, performs the work, and either succeeds or retries up to a threshold. The blueprint does *not* provide a separate "flow execution" mechanism for multi-step jobs. Multi-step coordination, step skipping on retry, and progress tracking are responsibilities of the handler, expressed in its own domain logic — typically by writing idempotently against domain tables that naturally record progress (the product row, the search-engine document, a `notifications` row). This is a deliberate choice: generic flow/workflow frameworks trade flexibility for complexity that most apps do not need, which is exactly the trade [the blueprint opposes](#on-frameworks).
+**One async mechanism.** Everything async goes through the queue. A payload, tagged with a `type` and `version`, is enqueued. A **handler** — code that knows what to do with that `(type, version)` pair — picks it up, performs the work, and either succeeds or retries up to a threshold. The blueprint does *not* provide a separate "flow execution" mechanism for multi-step jobs. Multi-step coordination, step skipping on retry, and progress tracking are responsibilities of the handler, expressed in its own domain logic — typically by writing idempotently against domain tables that naturally record progress (the product row, the search-engine document, a `notifications` row). This is a deliberate choice: generic flow/workflow frameworks trade flexibility for complexity that most apps do not need, which is exactly the trade [the blueprint opposes](#on-frameworks).
 
 **Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record already exist?", "have we already notified for this?") before acting. Not every handler needs it; trivial jobs that run once may not. The handler decides.
 
@@ -725,7 +725,8 @@ Database-backed queue. No external queue dependency until load requires it. This
 jobs
 ├── id
 ├── type            -- "send_sms", "product_sync", "professional_onboarding", etc.
-├── payload         -- JSON with a `version` field
+├── version         -- INTEGER, per-type. Bumped when the handler contract changes.
+├── payload         -- JSON
 ├── status          -- pending | processing | completed | failed
 ├── attempts        -- retry count
 ├── max_attempts    -- per job type
@@ -734,7 +735,7 @@ jobs
 └── updated_at
 ```
 
-**Payload + handler.** A job is a `type` and a versioned `payload`. The dispatcher routes by `(type, version)` to a **handler** — the code that performs the work for that payload shape. Multi-step coordination, step skipping on retry, and progress tracking are the handler's responsibility, expressed in its own domain logic. The blueprint does not provide a generic flow/workflow framework — that flexibility-for-complexity trade is exactly what [the blueprint opposes](#on-frameworks).
+**Payload + handler.** A job is a `(type, version)` pair plus a `payload`. The dispatcher routes by `(type, version)` to a **handler** — the code that performs the work for that contract. Multi-step coordination, step skipping on retry, and progress tracking are the handler's responsibility, expressed in its own domain logic. The blueprint does not provide a generic flow/workflow framework — that flexibility-for-complexity trade is exactly what [the blueprint opposes](#on-frameworks).
 
 **Worker claim pattern.** Workers claim jobs with row-level locking that other workers skip:
 
@@ -754,7 +755,18 @@ LIMIT 1;
 
 **Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record exist?", "have we already notified?") before acting. The handler decides what needs guarding; trivial jobs that run once may not need it.
 
-**Versioning.** Handler code is selected by `(type, version)`. New jobs use the current version. In-flight jobs of an older version complete with the handler that matches their version. Old handler code stays until no jobs of that version remain.
+**Versioning.** `version` lives as its own column alongside `type`, not inside the payload JSON. The dispatcher routes by `(type, version)` to the handler matching that pair. When a handler contract changes, bump the version and add the new handler; the old handler stays in code until no jobs of the old version remain. **In-flight payloads are never migrated** — they complete under the contract they were enqueued under; migrating live work in place is the kind of "clever" that produces 3 AM incidents.
+
+The column makes lifecycle queries trivial:
+
+```sql
+-- Safe to delete v1 handler code?
+SELECT COUNT(*) FROM jobs
+WHERE type = 'product_sync' AND version = 1
+AND status IN ('pending', 'processing');
+```
+
+Index `(type, version)` for these operational queries — but do not expect it to speed up workers. The worker hot path is `WHERE status = 'pending' AND next_retry_at <= NOW() FOR UPDATE SKIP LOCKED`, which uses its own index. Keep the two index purposes separate.
 
 ### Database Strategy
 
