@@ -47,9 +47,16 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Concurrency Control](#concurrency-control)
   - [Data Evolution Safety](#data-evolution-safety)
   - [Backward Compatibility Testing](#backward-compatibility-testing)
+- [Read Path Classification](#read-path-classification)
+  - [Critical Paths](#critical-paths)
+  - [Tolerant Paths](#tolerant-paths)
+  - [Why the Split Is Non-Negotiable](#why-the-split-is-non-negotiable)
+  - [Rules](#rules)
+  - [Read-Path Anti-Patterns](#read-path-anti-patterns)
 - [Infrastructure](#infrastructure)
   - [Background Jobs & Queues](#background-jobs--queues)
   - [Database Strategy](#database-strategy)
+    - [Horizontal Scaling in Every Direction](#horizontal-scaling-in-every-direction)
   - [Caching](#caching)
   - [Logging & Observability](#logging--observability)
   - [CI/CD Pipeline](#cicd-pipeline)
@@ -732,6 +739,49 @@ No single layer is sufficient alone. The deserializer centralizes the logic. The
 
 **Schema-level changes don't need this.** The database itself is the enforcement layer — migrations succeed with correct defaults or fail. End-to-end tests against a real database validate that code and schema agree. The discipline above exists precisely because JSON columns, queues, and caches lack that built-in enforcement.
 
+## Read Path Classification
+
+Every read in the system belongs to one of two categories. Decide which before writing the query, and place the data accordingly. Mixing the two in the same store is the root cause of most scaling pain.
+
+This principle applies to every storage class — databases, caches, search indexes, blob stores, message-derived projections. The reason it shows up most often as a *database* discipline is that databases are the one place teams routinely violate it; for every other storage class the derived-store nature is already obvious from the tool's name.
+
+### Critical Paths
+
+Reads that block a user-facing action — anything in the request path of a paying user.
+
+- Read from the **source-of-truth store**, scoped by the partition key.
+- Tight latency budget. Failure is user-visible; the store must be highly available.
+- **Never depend on a derived store being up, fresh, or even reachable.** If a projection, cache, or search index is down, the critical path degrades cleanly or fails its own feature only — it does not take down login, writes, or unrelated reads.
+
+### Tolerant Paths
+
+Reads that produce a view, report, recommendation, aggregate, or any computation the user can wait for, retry, or live without.
+
+- Read from a **derived store** — an asynchronous projection built from the source (CDC, event stream, scheduled batch).
+- Loose latency budget. Seconds, minutes, or hours, chosen per use case.
+- Failure means "stale" or "temporarily unavailable" — never "site down."
+- **Must be safe to wipe and rebuild from the source at any time.** The source is authoritative; the derived store is disposable.
+
+### Why the Split Is Non-Negotiable
+
+The two categories have opposite scaling profiles. Critical paths scale by sharding the source — more tenants, more shards, flat latency. Tolerant paths scale by adding read capacity to the derived store, or by moving the projection to an engine tuned for the query shape (columnar, OLAP, full-text, vector). Serving both from one store forces a compromise: either critical paths slow down under analytical load, or analytical queries get throttled to protect them. Separating the two is what makes both horizontally scalable without coordination.
+
+### Rules
+
+- Classify the path before writing the query. If the answer can be seconds (or minutes) stale without business impact, it is tolerant — route it through a derived store, even if "the source could handle it today."
+- Cross-tenant reads are tolerant by default. The source is partitioned by tenant; any read that spans tenants belongs in a derived store.
+- The projection from source to derived store is asynchronous and idempotent. Replays must converge to the same result.
+- The derived store has no authoritative data of its own. Anything that originates outside the source (a learned model, an admin annotation) must be persisted back to the source before anything depends on it.
+- Critical-path code must handle "derived store unavailable" as an expected condition, not an exception.
+
+### Read-Path Anti-Patterns
+
+- A user-facing endpoint that runs `JOIN ... GROUP BY` across tenant shards on every request.
+- A critical path that fails when a cache, search index, or analytical store is unreachable.
+- A derived store that cannot be rebuilt — because the source no longer has the data, or because the rebuild logic exists only in a one-off script.
+- "Real-time" applied to a path that is tolerant in business terms. If stale is acceptable, treat it as tolerant; if not, the path is critical and must hit the source.
+- Authoritative state living in the derived store. The moment a projection is the only place a fact exists, the projection has stopped being disposable.
+
 ## Infrastructure
 
 ### Background Jobs & Queues
@@ -793,6 +843,67 @@ schema definition  →  diff tool  →  migration SQL  →  applied to database
 
 - Use connection pooling in production
 - Repositories receive a connection interface — never open connections directly
+
+#### Horizontal Scaling in Every Direction
+
+A real system does not grow along a single axis. The database tier must have a horizontal answer for every direction the system might grow in, and each answer depends on the same small set of early decisions.
+
+**The directions:**
+
+1. **Tenants.** More customers, accounts, or orgs.
+2. **Data per tenant.** A single tenant accumulates millions or billions of rows.
+3. **Write throughput.** Ingest rate climbs with usage.
+4. **Read throughput.** Queries per second climb with traffic.
+5. **Connection count.** More application instances opening more sockets.
+6. **Geography.** Users spread across regions; latency starts to matter.
+7. **Query shapes.** The same data is asked very different questions — point lookups, aggregates, full-text, similarity, graph traversal.
+
+Vertical scaling answers none of these for long. A single machine has fixed CPU, RAM, IOPS, and connection caps. The horizontal answers below exist for all seven, but they all depend on two earlier decisions.
+
+**The two decisions that unlock everything:**
+
+1. **Partition key, chosen once.** Every source-of-truth row carries a partition key tied to the natural unit of isolation — typically the tenant. Every write specifies it; every read filters by it; no transaction crosses it. With this in place, sharding is mechanical: split the shard map, route by key, done. Without it, sharding is a multi-quarter rewrite of every query.
+2. **No authoritative state outside the partitioned source.** Caches, indexes, projections, warehouses — all derived, all rebuildable. Anything that originates outside the source (a learned model, an admin annotation) is written back into the partitioned source before anything depends on it. See [Read Path Classification](#read-path-classification).
+
+These two decisions are the precondition for every horizontal answer below. They cost nothing on a single database today and cost everything to retrofit later.
+
+**Horizontal answers, by direction:**
+
+| Direction | Answer | Precondition |
+|---|---|---|
+| **Tenants** | Shard the source by partition key. Add shards as tenant count grows; rebalance by moving partitions, not rows. | Partition key on every row and in every query. |
+| **Data per tenant** | Sub-shard inside the tenant by time, hash, or a natural sub-key. Archive cold partitions to cheaper storage. | Time or sub-key column present from day one; no queries that scan the whole tenant. |
+| **Write throughput** | Append-only tables where possible; absorb bursts in a queue; fan writes across shards by partition key. | Idempotent writes; no global sequences; no cross-partition transactions. |
+| **Read throughput** | Read replicas of source shards (still partition-scoped) for critical reads. Derived stores for tolerant reads, scaled independently. | Reads classified as critical or tolerant; application tolerates replica lag on the critical path or routes to primary when it cannot. |
+| **Connection count** | Connection pooling and multiplexing in front of every shard. Application instances stay stateless so any instance can talk to any shard. | Stateless services; pool sized per shard, not per app instance. |
+| **Geography** | Pin each partition to a home region. Replicate read-only copies into other regions for latency. Global data lives in its own globally-keyed store with explicit cross-region semantics. | Partition is the unit of regional placement; no cross-region transactions; eventual consistency accepted for read replicas. |
+| **Query shapes** | One source of truth, many derived stores, each tuned for its query shape — columnar for analytics, inverted index for search, vector for similarity, graph for traversal. Each derived store is rebuildable from the source. | Read path classification; tolerant paths never read from the source shards. |
+
+Every row reduces to the same pattern: **partition the source, replicate per workload, derive per query shape.**
+
+**Why this works:**
+
+- The source stays small per shard. Adding tenants adds shards, not rows-per-shard. Latency stays flat as the system grows.
+- Each workload scales independently. Critical-path reads scale by adding replicas. Tolerant reads scale by adding derived-store capacity. Writes scale by adding shards. None of the three competes for the same machine.
+- Failure is localized. A shard outage takes out one slice of tenants, not the platform. A derived store outage degrades a feature, not the product.
+- Migrations stay tractable. Schema changes apply per shard, in parallel, with no cross-shard coordination. A bad migration can be paused after one shard and rolled back before it reaches the rest.
+- The cost curve is linear. Doubling tenants doubles shards. Doubling query types adds one derived store. There is no point at which the architecture has to be thrown away and rewritten.
+
+**Rules:**
+
+- Pick the partition key before writing the first table. Treat it as architectural, not a column.
+- Every source-of-truth query filters by the partition key. No exceptions on the critical path.
+- Cross-partition operations happen in the application layer, asynchronously, and only for tolerant paths.
+- Schema changes are designed to apply per shard. No migration assumes a single global database.
+- New query shapes get a new derived store, not a new index on the source. The source's job is to be small, fast, and write-optimized.
+
+**Anti-patterns:**
+
+- A "shared" table that is not partition-scoped (settings, lookups, synonyms) and grows with tenant count. If it has to exist globally, it lives in a separate globally-keyed store with its own scaling story — not in the tenant shards.
+- A read replica used for cross-tenant analytics. Replicas exist to scale critical-path reads on the same partition; cross-tenant aggregation belongs in a derived store.
+- A globally unique auto-increment sequence used as a primary key in a partitioned table. It silently couples shards and blocks rebalancing.
+- A schema migration that requires downtime because it cannot run shard-by-shard.
+- "We will shard when we need to." If the partition key is not on every row and in every query today, you cannot shard tomorrow without rewriting the application.
 
 ### Caching
 
