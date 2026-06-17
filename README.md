@@ -123,7 +123,7 @@ Controller → UseCase → Repository/Domain
 
 Logic placement follows two principles from above: data is immutable, and behavior is decomposed by operation. Entities carry data and enforce invariants but have no mutating methods. State transitions, calculations, and multi-entity coordination live in domain services — **one service per operation**, colocated with the aggregate it operates on. This trades language-enforced invariants for explicit data flow, trivial testability, and consistency with the rest of the blueprint's immutable style.
 
-Getting placement wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, repositories that compute business rules, services that turn into god-classes.
+Getting placement wrong is the most common cause of architectural drift — use cases that bloat into orchestration nightmares, controllers that grow domain logic, services that turn into god-classes.
 
 | Logic type | Lives in | Examples |
 |------------|----------|----------|
@@ -131,7 +131,7 @@ Getting placement wrong is the most common cause of architectural drift — use 
 | Self-contained immutable concept with validation and equality | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
 | One operation over domain data — state transition, calculation, or multi-entity coordination | **Domain Service** | `BookingConfirmer.confirm(booking)`, `BookingCanceller.cancel(booking, reason)`, `PricingCalculator.calculate(booking, package)`, `AvailabilityFinder.find(professional, range)` |
 | Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
-| Query and persistence for a single aggregate | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()` |
+| Producing immutable DTOs from a data source | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()`, `BookingDashboardRepository.find()`, `UserAnalyticsRepository.findForMonth()` |
 | Reusable technical logic — no domain concepts, no I/O | **Shared Service** | `IdGenerator`, `Slugifier`, `Clock`, `RetryPolicy` |
 | I/O against external systems | **Infrastructure adapter** (behind an interface) | `RedisCacheAdapter`, `BillingProviderApiClient`, `SqsQueueAdapter` |
 
@@ -142,11 +142,11 @@ Getting placement wrong is the most common cause of architectural drift — use 
 3. Generic technical logic with no domain concepts? → **Shared Service**.
 4. One operation over domain data (transition, calculation, coordination)? → **Domain Service** — one service per operation, named for what it does.
 5. Single business operation owning a transaction? → **Use Case**.
-6. Storage query? → **Repository**.
+6. Reads from or writes to a data source? → **Repository** — aggregate repository for the source-of-truth aggregate; read-only repository for any other shape (cross-aggregate joins, dashboards, analytics, derived views).
 
 **One service = one operation.** A domain service does one thing. `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the wrong shape — split into `BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`. The discipline solves both ends: invariants live in the obvious file, and "what can I do with a `Booking`?" is answered by `ls src/Domain/Booking/`.
 
-For misplacement anti-patterns (mutating entities, god-services, repositories computing rules, controllers branching on domain state, domain services touching I/O, shared services holding domain concepts), see [Anti-Patterns → Architecture](#anti-patterns).
+For misplacement anti-patterns (mutating entities, god-services, controllers branching on domain state, domain services touching I/O, shared services holding domain concepts), see [Anti-Patterns → Architecture](#anti-patterns).
 
 **Colocation.** Each aggregate gets its own folder under `src/Domain/`, holding the entity and every service that operates on it:
 
@@ -218,6 +218,38 @@ src/Controller/
 - Use a shared `jsonResponse(response, data)` method for JSON output
 - Route args accessed via request attributes
 - Constructor injects use case interface(s)
+
+### Repositories
+
+A **repository** is any class that produces immutable DTOs from a data source, behind an interface. Two flavors on the same axis:
+
+- **Aggregate repository** — owns one aggregate's read+write surface. Partition-scoped, source-of-truth queries. Returns the entity; accepts it on writes.
+- **Read-only repository** — shapes DTOs that aren't the aggregate: cross-aggregate joins, dashboards, analytics, derived views. No write methods.
+
+Same category, same conventions. Naming rule: `{WhatItReturns}Repository`.
+
+```
+src/Domain/
+└── Booking/
+    ├── Booking.php                                # Entity
+    ├── BookingRepositoryInterface.php             # Aggregate repo — returns Booking
+    ├── BookingDashboardRepositoryInterface.php    # Read-only — returns BookingDashboard
+    └── UserAnalyticsRepositoryInterface.php       # Read-only — returns UserAnalytics
+```
+
+**Logic placement is practical, not dogmatic.** Aggregations, derivations, conditional shaping, and branching live wherever they read most naturally — in the repository (often: `GROUP BY`, `JOIN`, computed columns, window functions) or in a domain service (often: rules over already-loaded entities). The blueprint does not draw a line between "what SQL can express" and "what application code should express" — those lines turn philosophical fast. Place it where it's clearest. Stubs/mocks unit-test the logic regardless of where it sits (see [Isolation Per Layer](#isolation-per-layer)).
+
+**Backing store is the implementation, not the contract.** A read-only repository can be backed by anything — a join over normalized tables, a projection table, a search index, a read replica, a materialized view. Choice follows [Read Path Classification](#read-path-classification): critical reads against source of truth, tolerant reads against derived stores. The interface stays stable; implementations swap.
+
+**When to split a read out of an aggregate repository.** The return shape isn't the aggregate, OR the data source differs from the aggregate's table, OR the read serves a fundamentally different consumer (dashboard, report, search). Until one of those triggers, the read stays on the aggregate's repository.
+
+**Repository rules:**
+
+- Returns and accepts immutable DTOs (or primitives) — no mutable input
+- Behind an interface; the implementation reads from a single data source
+- No calls to other repositories — cross-aggregate orchestration belongs in the use case or domain service
+- No I/O beyond the data source — no HTTP calls, no queue dispatches, no filesystem
+- Tested both as unit (stub the data source) and integration (real backend) per [Isolation Per Layer](#isolation-per-layer)
 
 ### Transaction Boundaries
 
@@ -1274,7 +1306,6 @@ Current structure is **layer-first** — correct at small scale.
 | Request/Response DTOs     | Use case takes 8+ params or same shape passed across layers         | Replace arrays/maps with typed DTOs                             |
 | Split Infrastructure      | 10+ adapters, navigation becomes painful                            | Subdirectories: `Infrastructure/Cache/`, `Infrastructure/Queue/`, etc. |
 | Domain events             | Use case grows with side effects (SMS, notifications, availability) | Dispatch events, handle in listeners                            |
-| Query objects (CQRS-lite) | Complex reads diverge from writes                                   | Read-only use cases that query directly                         |
 
 **What to keep regardless of scale:**
 
@@ -1292,8 +1323,7 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 - **Business logic in controllers.** Controllers parse, validate, delegate, format. Branching on domain state, computing totals, deciding what to persist — all belong in the use case.
 - **Mutating methods on an entity.** Entities are immutable (see [Design Principles](#design-principles)). State transitions are domain services that take the entity and return a new instance — never `booking.confirm()` mutating in place.
 - **God-services / multi-operation domain services.** `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the symmetric anti-pattern to god-entities. Split into one service per operation (`BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`).
-- **Repository-to-repository calls.** Repositories are query executors, not orchestrators. Cross-entity coordination happens in the use case.
-- **Repository computing business rules.** Repositories execute queries; they do not interpret results. Move logic to the use case or a domain service.
+- **Repository-to-repository calls.** Cross-aggregate orchestration happens in the use case or domain service, not by chaining repositories.
 - **Domain objects performing I/O.** No HTTP calls, queue dispatches, or filesystem writes from entities, value objects, or domain services. Side effects live behind interfaces, invoked from use cases.
 - **Shared Service holding domain concepts.** If a class in `Shared/` references `Booking` or any domain type, it is a **Domain Service**, not shared. `Shared/` is for technical utilities with no domain knowledge.
 - **Framework types in the domain.** Use cases and entities import nothing framework-specific. HTTP requests stop at the controller. ORM models do not exist — repositories return domain objects, not framework rows.
