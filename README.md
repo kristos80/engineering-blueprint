@@ -206,7 +206,7 @@ src/Controller/
 
 - Use cases do NOT call other use cases
 - If two use cases share logic, extract it into a repository method or domain service
-- Each use case class implements a corresponding interface (for DI and testing)
+- Each use case class implements a corresponding interface (for DI and testing). In languages where `final` classes cannot be mocked by the testing framework (PHP, C#, Kotlin), the interface is also a *testing necessity* — controllers are unit-tested against a stubbed use case interface, and `final` on the implementation is preserved for the runtime safety and compiler-optimization reasons documented in [Design Principles](#design-principles)
 - Registered in the container as `Interface → Implementation`
 - Pure application logic — no framework imports, no HTTP concepts
 
@@ -322,6 +322,8 @@ class Transaction implements TransactionInterface
 - Inside a transaction: `holder.get()` returns the transaction connection — all queries are atomic
 - Repositories are unaware of which mode they're in — same code, same interface, different behavior based on context
 
+**Trade-off worth naming.** The connection holder *is* implicit context, which sits awkwardly next to the blueprint's "explicit over implicit" principle. The alternative — threading a `tx` parameter into every repository method — leaks transaction awareness into every repository signature and breaks the "repositories are transaction-unaware" rule above. The blueprint accepts the implicit context because it is **contained to a single, well-understood component** (the holder) rather than spread across the codebase. If your team prefers the explicit-parameter style, swap the holder for `tx`-passing — the rest of the architecture stands.
+
 ### State in Long-Lived Processes
 
 "Stateless" applies to services, not processes. A PHP-FPM worker is recycled per request, so the language enforces process-level statelessness for free. A long-lived async runtime (Node.js, Go, async Python, JVM) does not — the process survives across requests and may legitimately hold rebuildable in-memory state: connection pools, prepared statement caches, compiled regexes, JIT-compiled query plans.
@@ -395,9 +397,12 @@ Use cases throw domain/validation exceptions. Controllers never throw — they c
 
 ### Input Validation
 
-- **Validate in the controller.** It's adapter logic — reject malformed HTTP input before it reaches the use case.
-- **Use cases assume valid input.** They received it from a trusted boundary (the controller).
-- Return 422 with field-level errors in the `fields` object.
+Validation is two-tier — split by what the layer has the context to check.
+
+- **Structural validation in the controller.** Types, formats, required fields, length bounds, value ranges, enum membership. Reject malformed HTTP input before it reaches the use case. This is adapter logic — no business knowledge required.
+- **Business validation in use cases and domain services.** Uniqueness checks, state preconditions ("can this booking be cancelled?"), authorization beyond identity ("can this user act on this resource?"), and any rule that requires reading current state. Domain invariants enforced in entity constructors (see [Where Logic Lives](#where-logic-lives)) are the innermost layer of this — if an entity refuses to be constructed, the rule cannot be bypassed.
+- **Use cases assume structural validity, not business validity.** The controller guarantees the input parses; the use case still checks whether the operation is allowed against current state.
+- Return 422 with field-level errors in the `fields` object for structural failures; map business-rule violations to the appropriate domain exception (typically `DomainException` → 409 or `AuthorizationException` → 403).
 
 ```
 class BookingCreateController extends AbstractController
@@ -664,6 +669,14 @@ Deploy 1 (expand):  Add new column/field, code writes to both old and new
 Deploy 2 (migrate): Backfill old data
 Deploy 3 (contract): Remove old column/field, code only uses new
 ```
+
+**Schema execution safety on large tables.** Expand-contract describes the *shape* of safe evolution; it does not describe how each step actually runs. On large tables, a single `ALTER TABLE` or non-concurrent `CREATE INDEX` can take an exclusive lock for seconds-to-minutes and stall every write during that window — turning a "safe" expand step into a production outage. Above a threshold (a common starting point is ~1M rows, lower if the table is on a hot write path), schema changes must use lock-light primitives instead:
+
+- **PostgreSQL** — `CREATE INDEX CONCURRENTLY`, `ALTER TABLE ... ADD COLUMN` without a non-null default on recent versions, `SET STATISTICS`, `VALIDATE CONSTRAINT` as a separate step from `ADD CONSTRAINT NOT VALID`
+- **MySQL 8+** — online DDL (`ALGORITHM=INPLACE, LOCK=NONE`) where the operation supports it; verify per-operation, since some still take a metadata lock
+- **External tools** — `gh-ost`, `pt-online-schema-change` for operations the database cannot do online natively; they copy the table in the background and swap atomically
+
+The migration tool running in CI must know which strategy applies, and the migration itself should fail-fast in CI if it would attempt a locking operation against a table above the threshold. "It worked on staging" is not a guarantee when the production table is 100× larger.
 
 ### Backward Compatibility Testing
 
@@ -1008,6 +1021,7 @@ Every row reduces to the same pattern: **partition the source, replicate per wor
 - **Invalidate explicitly on write** — not time-based TTL (stale data is worse than slow data for most operations).
 - **Cache key includes a version** for safe deploys: `v3:professional:slug:glamour-by-sofia`
 - **Never cache user-specific data in shared caches** without proper key scoping.
+- **Stampede protection is an escalation, not a default.** On extremely hot reads, naive invalidation can cause many concurrent requests to miss the cache at the same instant and slam the source together. Fan-in protection (request coalescing/singleflight, stale-while-revalidate, lock-on-rebuild, or write-through on the specific hot key) is the escalation — applied per workload, not globally. Most caches never need it; the ones that do are obvious from their load profile.
 
 ### Observability
 
