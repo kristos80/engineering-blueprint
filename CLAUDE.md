@@ -20,13 +20,16 @@ When working on any project that references this blueprint, follow these rules:
 - Controllers handle HTTP only — zero business logic
 - One use case = one business operation = one transaction boundary
 - Use cases do NOT call other use cases — extract shared logic into repository methods or domain services
+- Anemic entities — data + constructor invariants only, no mutating methods. State transitions live in one-operation domain services (`BookingConfirmer.confirm(booking)`, not `booking.confirm()`)
+- Colocation by aggregate under `src/Domain/{Aggregate}/` — entity + every service that operates on it + repository interface in one folder
 - All dependencies injected through constructor interfaces
 - Repositories write SQL directly — no ORM
+- Misplacement rules (where logic should NOT live) — see Anti-Patterns in the README
 
 ### Code style
 - Explicit over implicit — dependencies injected, state checked, contracts are interfaces
+- Immutability paired with statelessness — entities, value objects, DTOs, use cases, controllers all immutable. No setters, no in-place mutation. State transitions return new instances
 - No premature abstraction — add structure when pain arrives, not before
-- Final, immutable classes for use cases and controllers
 - Use case interface per feature: `{Name}UseCaseInterface` with a single `execute()` method
 
 ### API design
@@ -37,9 +40,10 @@ When working on any project that references this blueprint, follow these rules:
 
 ### Reliability
 - Idempotent operations — any step that might be retried must be safe to repeat
-- State guards on entities — check current state, don't assume history
-- Flow execution tracker for multistep operations where partial completion is unacceptable
-- Event system for side effects (SMS, notifications, analytics) — not core business logic
+- State guards in use cases and domain services — check current state, don't assume history (entities are anemic, so guards do not live on them)
+- Side effects: pick one of three — synchronous call (must succeed in-request, DB-only inside the transaction), in-process event (fire-and-forget, loss acceptable), or queued job (must eventually succeed)
+- One async mechanism: the queue. Multi-step coordination is the handler's job, expressed against domain tables. No separate flow-execution framework
+- Concurrency: unique constraint + idempotency key for creates; pessimistic locking for critical updates; optimistic locking for non-critical updates
 - Third-party calls: local guard + vendor idempotency key (defense in depth)
 
 ### Data
@@ -51,7 +55,9 @@ When working on any project that references this blueprint, follow these rules:
 ### Testing
 - 100% code coverage, 100% mutation score where applicable
 - Stubs by default, mocks only when the side effect IS the behavior
-- Controller tests stub use cases; use case tests stub repositories; repository tests use real DB
+- Controller tests stub use cases; use case tests stub repositories
+- Repository tests are BOTH unit (stub the data source for branching/orchestration logic) AND integration (real DB for SQL/schema contract) — neither replaces the other
+- Repository unit tests assert behavior visible from return values, never SQL strings, parameter binding order, or driver call signatures
 - Infrastructure integration tests for anything behind an interface (repos, cache, queue)
 
 ### Security
