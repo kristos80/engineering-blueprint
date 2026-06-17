@@ -1476,6 +1476,10 @@ Review confirms these were followed; it does not duplicate their work:
 AI is a force multiplier for existing architecture, not a productivity shortcut.
 
 - **Architectural boundaries are guardrails.** Module ownership, stable interfaces, and dependency rules constrain AI-generated code.
+- **Machine-checkable rules where possible.** Architectural constraints expressed in linters, static analysis, dependency-direction checks, and test fixtures catch drift automatically — regardless of whether the author is human or AI. Rules that live only in prose drift faster the more code AI generates. Codify what can be codified; documentation is the fallback, not the primary enforcement layer.
 - **Quality gates are non-negotiable.** Tests, static analysis, mutation testing, and CI thresholds apply equally to human and AI contributions.
+- **Existing patterns first.** AI-generated code references the patterns already in the codebase before introducing new ones. A novel shape of repository, controller, or service inflates the architectural surface area without earning it. If no existing pattern fits, the introduction is reviewed as an architectural change — not waved through as an implementation detail.
 - **Code must remain understandable.** Developers stay accountable — AI output is reviewed and maintained like any other code.
 - **AI reinforces discipline.** Faster feedback loops, better tests, clearer code. Backed by architecture and policies that prevent surprises.
+
+> *This section is the blueprint's most open to revision. AI tooling, integration patterns, prompting conventions, and team workflows around AI-assisted work are all evolving quickly; rules here are expected to be added, sharpened, or retired as practice catches up with the technology. Treat the current bullets as a starting position, not a settled stance.*
