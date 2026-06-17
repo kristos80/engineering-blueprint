@@ -1072,6 +1072,8 @@ Two pitfalls worth flagging: regenerating the correlation ID mid-flow (breaks th
 
 ### CI/CD Pipeline
 
+> *The pipeline gates below are load-bearing — every PR passes them or it does not merge. The specific tooling (test runner, static analyzer, mutation framework, deploy targets, CI provider) is organization-specific; this section names the gates, not the tools.*
+
 **Every PR must pass:**
 
 - Unit tests (100% coverage)
@@ -1145,6 +1147,8 @@ The distinction matters for rolling deploys: an instance that is alive but still
 
 ### Security
 
+> *This is the essential baseline — controls that apply to most web applications. Production systems require a threat model for their specific domain, attack surface, and regulatory context; the list below covers the floor, not the ceiling.*
+
 - **Parameterized queries only.** No string concatenation in SQL — ever. Repositories use prepared statements.
 - **Escape all output.** Context-appropriate escaping for HTML, JSON, URLs. No raw user input in templates.
 - **HTTPS only.** Redirect HTTP → HTTPS. Set `Strict-Transport-Security` header.
@@ -1154,6 +1158,8 @@ The distinction matters for rolling deploys: an instance that is alive but still
 - **Content Security Policy.** Restrict inline scripts, external resources. Prevents XSS escalation.
 
 ## Subscriptions & Payments
+
+> *This section is a worked example from one product domain, not a universal blueprint. The reusable principles are the separation of concerns (external provider owns billing, local store owns feature gating) and the provider-agnostic interface boundary. The schema and flow specifics are illustrative — your subscription model, top-up types, and webhook contracts will differ.*
 
 Approach: **external billing provider** behind interfaces. The provider handles recurring billing, dunning, invoicing, and tax. Our app handles business logic and feature gating.
 
