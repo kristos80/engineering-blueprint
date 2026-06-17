@@ -324,6 +324,8 @@ class Transaction implements TransactionInterface
 
 **Trade-off worth naming.** The connection holder *is* implicit context, which sits awkwardly next to the blueprint's "explicit over implicit" principle. The alternative — threading a `tx` parameter into every repository method — leaks transaction awareness into every repository signature and breaks the "repositories are transaction-unaware" rule above. The blueprint accepts the implicit context because it is **contained to a single, well-understood component** (the holder) rather than spread across the codebase. If your team prefers the explicit-parameter style, swap the holder for `tx`-passing — the rest of the architecture stands.
 
+**Request-scope is non-negotiable.** Whichever style you pick, the implicit-context version *must* be bound to the request's async execution context — `AsyncLocalStorage` in Node, `context.Context` in Go, `ContextVar` in async Python, request-scoped DI in JVM/Kotlin. A process-wide or module-level holder will leak the active transaction across concurrent in-flight requests, routing one request's queries into another request's transaction. This is the failure mode the explicit-parameter alternative avoids by construction; if the holder route is taken, the async-context binding is what closes the same gap.
+
 ### State in Long-Lived Processes
 
 "Stateless" applies to services, not processes. A PHP-FPM worker is recycled per request, so the language enforces process-level statelessness for free. A long-lived async runtime (Node.js, Go, async Python, JVM) does not — the process survives across requests and may legitimately hold rebuildable in-memory state: connection pools, prepared statement caches, compiled regexes, JIT-compiled query plans.
@@ -462,6 +464,20 @@ When a use case has work beyond its core operation — sending email, recording 
 
 **One async mechanism.** Everything async goes through the queue. A payload, tagged with a `type` and `version`, is enqueued. A **handler** — code that knows what to do with that `(type, version)` pair — picks it up, performs the work, and either succeeds or retries up to a threshold. The blueprint does *not* provide a separate "flow execution" mechanism for multi-step jobs. Multi-step coordination, step skipping on retry, and progress tracking are responsibilities of the handler, expressed in its own domain logic — typically by writing idempotently against domain tables that naturally record progress (the product row, the search-engine document, a `notifications` row). This is a deliberate choice: generic flow/workflow frameworks trade flexibility for complexity that most apps do not need, which is exactly the trade [the blueprint opposes](#on-frameworks).
 
+**Transactional outbox — enqueue inside the transaction.** "Commit, then enqueue" has a silent failure mode: the database commits, the process dies (or the network blips, or the queue write times out) *before* the enqueue lands, and the side effect is permanently lost. Because the queue is a database-backed `jobs` table (see [Background Jobs & Queues](#background-jobs--queues)), the fix is mechanical: insert the job row **inside the same transaction** as the business write. Either both commit, or neither does — no commit-to-enqueue gap exists.
+
+```
+transaction.run(() =>
+    booking = bookingRepository.create(...)              // domain write
+    jobRepository.enqueue("booking.send_confirmation",   // outbox insert
+                          version=1,
+                          payload={ booking_id: booking.id })
+)
+// Worker picks up the row after commit — never before, because it isn't visible yet
+```
+
+This is the **transactional outbox pattern**: the `jobs` table is the outbox, the worker is the publisher, and the queue contract is preserved without an external message broker. If the queue ever migrates off the database (Kafka, SQS, etc.), the same table becomes a true outbox that a relay process drains into the external broker — same pattern, different topology.
+
 **Idempotency: recommended, not forced.** When a handler has steps whose effects must not be duplicated on retry, it implements idempotency — usually by checking domain state ("does this record already exist?", "have we already notified for this?") before acting. Not every handler needs it; trivial jobs that run once may not. The handler decides.
 
 **Retry threshold.** Every job has a maximum attempt count after which it stops retrying and surfaces as failed for operator attention. Where the threshold lives — in the jobs table, in the handler — is an implementation choice; both work.
@@ -549,6 +565,8 @@ paymentRepository.store(orderReference, result)
 Neither layer alone is sufficient: local guard misses "DB write failed after vendor call", vendor key misses "no vendor support". Together they cover every failure mode.
 
 **Vendor selection criterion:** any payment or financial provider that doesn't support idempotency keys is a red flag.
+
+**Key lifetime is bound to data lifetime, not to a clock.** An idempotency key exists to recognize a retry against the current state; as long as the data the key protects still exists, the key must too. Time-based pruning (a 7-day or 30-day window, an "old keys are probably new operations" policy) silently converts retries into duplicate writes — the exact bug idempotency exists to prevent. The client sent the same key, which is a contractual assertion that this is the same operation; the system does not get to reinterpret that assertion based on age. Performance on growing idempotency tables is solved with partitioning by `created_at`, narrow covering indexes on `(key, status)`, and hot/cold splits if a single table genuinely outgrows a node — never with deletion. Keys are purged only when the underlying data is purged (tenant offboarding, GDPR erasure, hard archive of a closed account); the lifecycles move together because they are part of the same authoritative record.
 
 ### Concurrency Control
 
@@ -677,6 +695,8 @@ Deploy 3 (contract): Remove old column/field, code only uses new
 - **External tools** — `gh-ost`, `pt-online-schema-change` for operations the database cannot do online natively; they copy the table in the background and swap atomically
 
 The migration tool running in CI must know which strategy applies, and the migration itself should fail-fast in CI if it would attempt a locking operation against a table above the threshold. "It worked on staging" is not a guarantee when the production table is 100× larger.
+
+**Declarative diff tools above the threshold: generate, don't auto-apply.** Schema-driven migration tools that diff a declared schema against a live database are convenient for small tables but dangerous on large or sharded ones. A diff that looks benign at the schema level can compile to destructive SQL (`DROP CONSTRAINT; ADD CONSTRAINT`, table rewrite, full-table `ALTER`), which then runs against every shard in turn. Above the row/criticality threshold, the rule is: the tool **generates the SQL patch; a human reviews and executes it** using the lock-light primitives above. Auto-apply mode is fine for development and small tables; it is not safe as a deployment step against production data of meaningful size.
 
 ### Backward Compatibility Testing
 
