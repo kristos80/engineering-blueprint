@@ -59,7 +59,7 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Database Strategy](#database-strategy)
     - [Horizontal Scaling in Every Direction](#horizontal-scaling-in-every-direction)
   - [Caching](#caching)
-  - [Logging & Observability](#logging--observability)
+  - [Observability](#observability)
   - [CI/CD Pipeline](#cicd-pipeline)
     - [Hotfix Process](#hotfix-process)
   - [Deployment](#deployment)
@@ -1009,9 +1009,19 @@ Every row reduces to the same pattern: **partition the source, replicate per wor
 - **Cache key includes a version** for safe deploys: `v3:professional:slug:glamour-by-sofia`
 - **Never cache user-specific data in shared caches** without proper key scoping.
 
-### Logging & Observability
+### Observability
 
-**Structured JSON logs.** Machine-parseable, greppable, aggregatable.
+> Unlike the rest of this blueprint, this section is a recommendation based on industry consensus rather than rules forged in production incidents. Adopt as a starting point; revise as your team's operational experience grows. Specific patterns depend heavily on the observability stack you choose (Datadog, Honeycomb, Prometheus + Grafana, OpenTelemetry, etc.) — the framing below stays tool-agnostic.
+
+**Three pillars, three different questions.** Production observability is usually framed around three complementary signals. They are not interchangeable; each answers a question the others cannot.
+
+- **Logs** — discrete events with full context. "What exactly happened at this moment, and what did the request look like at the time?"
+- **Metrics** — numeric time-series aggregated across many events. "What is the rate, count, latency distribution, or saturation over time?"
+- **Traces** — causal chains across components and services. "Which path did this request take, and where did the time go?"
+
+A common rule of thumb: when something breaks, metrics tell you *that* it broke and roughly *where*; traces narrow it to a specific call; logs give the exact context at the failing step.
+
+**Logs.** Structured (JSON) lines, one per discrete event. Machine-parseable, greppable, aggregatable.
 
 ```json
 {
@@ -1020,28 +1030,45 @@ Every row reduces to the same pattern: **partition the source, replicate per wor
   "context": {
     "order_id": "uuid",
     "provider": "billing_provider",
-    "error_code": "card_declined"
+    "error_code": "card_declined",
+    "correlation_id": "req-7f3a..."
   },
   "timestamp": "2026-03-06T12:00:00Z"
 }
 ```
 
-**What to log:**
+Typical things worth logging: incoming requests (method, path, status, duration), outgoing external calls (provider, duration, outcome), errors and exceptions with their context, and business events (booking created, payment processed) as a durable audit trail. Typical things to avoid: passwords, tokens, API keys, card numbers, full request/response bodies in production, personal data beyond what's needed to debug. Log levels follow the usual ladder — `error` for bugs and failures, `warning` for degraded service that recovered, `info` for business events, `debug` for development.
 
-- Incoming requests (method, path, status code, duration)
-- Outgoing calls to external services (provider, duration, success/failure)
-- All errors and exceptions with context
-- Business events (booking created, payment processed) — audit trail
+A common pitfall is emitting metrics as log lines (`logger.info("requests_processed=42")`). The metrics pipeline exists to aggregate; log lines are not designed for that.
 
-**What NOT to log:**
+**Metrics.** Numeric measurements emitted over time and aggregated by a dedicated pipeline. Three primitives cover most needs:
 
-- Passwords, tokens, API keys, card numbers — ever
-- Full request/response bodies in production (log selectively in debug)
-- Personal data beyond what's needed for debugging (GDPR)
+- **Counter** — monotonically increasing total (requests served, errors raised, jobs processed)
+- **Gauge** — point-in-time value that can go up or down (queue depth, active connections, in-flight jobs)
+- **Histogram** — distribution of values (request latency, payload size, job duration)
 
-**Log levels:** `error` for bugs and failures, `warning` for degraded service (retry succeeded), `info` for business events, `debug` for development only.
+Worth instrumenting from day one: request rate, request latency (as a histogram, not just an average), error rate, queue depth and wait time, external-call latency and failure rate, and a small set of business metrics (bookings/minute, payment success rate). Two widely-cited starting checklists are **RED** (Rate, Errors, Duration — for services) and **USE** (Utilization, Saturation, Errors — for resources). Either gives a defensible baseline.
 
-Use a standard logging interface — implementation is swappable (file, stdout, external service).
+Most metrics pipelines support labels/tags on each measurement (e.g., `http_requests_total{method="POST", route="/booking", status="500"}`). Keep label cardinality bounded — a label whose value is a user ID, request ID, or anything similarly unbounded explodes the time-series count and is the most common metric-pipeline footgun.
+
+**Traces.** A trace captures the causal chain of a single request through the system, broken into spans (one per logical step — controller, use case, repository call, external HTTP call). Each span records its duration, parent span, and a handful of attributes. Together they answer "where did the latency come from?" and "which downstream did the failure originate in?".
+
+Tracing pays off most once requests cross more than one process — service-to-service calls, async job hand-offs, third-party APIs. Within a single process it overlaps with what a good profile would tell you, but the propagation discipline is the same and worth establishing early.
+
+OpenTelemetry has become the de facto vendor-neutral instrumentation standard; most backends (Datadog, Honeycomb, Jaeger, Tempo) accept its output. Sampling strategies, span-attribute conventions, and exemplar correlation between metrics and traces are intentionally out of scope here — they depend on the vendor.
+
+**Correlation IDs — the thread through all three.** A correlation ID is a single identifier that ties together every log line, span, metric exemplar, and downstream call belonging to one logical operation. Without it, the three pillars become three disconnected views of the same incident.
+
+A common implementation:
+
+- **Generated at the edge.** The controller mints a new correlation ID for each incoming request, or honors `X-Request-Id` (or `traceparent`) if it arrives from a trusted upstream.
+- **Carried through the call stack.** A request-scoped context (logger, tracer, or explicit parameter) carries the ID into use cases, repositories, and external clients so every emitted log line and span tags it automatically.
+- **Propagated to async work.** When a use case enqueues a job, the job payload carries the originating correlation ID. The handler logs and traces under the same ID so the async leg is correlatable with the request that triggered it.
+- **Propagated to external calls.** Outbound HTTP requests forward the ID via header (`X-Request-Id`, `traceparent`) so the third party's logs can be tied back to yours during incident response.
+
+Two pitfalls worth flagging: regenerating the correlation ID mid-flow (breaks the chain), and conflating it with user ID or session ID (correlation IDs are per-operation; identity is per-user — they are orthogonal).
+
+**Pluggable interfaces.** Like every other I/O concern in this blueprint, observability sits behind interfaces — `LoggerInterface`, `MetricsInterface`, `TracerInterface`. Implementations swap (file, stdout, vendor SDK, OTLP exporter) without touching use cases. Use cases and domain services depend on the interfaces and emit signals through them; they never know which backend is on the other end.
 
 ### CI/CD Pipeline
 
