@@ -425,17 +425,20 @@ class BookingCreateController extends AbstractController
 
 ### Authentication & Authorization
 
-- **JWT for stateless auth.** Token contains user ID and role. No server-side sessions.
-- **Middleware extracts auth context** from the `Authorization` header and attaches it to the request as an attribute.
-- **Controllers access auth via request attribute:** `request.getAttribute("auth")`
-- **Role-based access:** middleware checks role before the controller runs. Controllers don't check permissions — middleware already did.
+Four concerns, three layers. Do not collapse them into a single "is this user allowed" check.
+
+- **Authentication** — middleware. Extracts the JWT from the `Authorization` header, verifies it, and attaches the principal (user ID, role, tenant scope) to the request. 401 on missing or invalid token. Controllers access the principal via `request.getAttribute("auth")`. Use cases receive a user ID, never a token.
+- **Coarse authorization (role gate)** — middleware. Checks the principal's role against the route before the controller runs. 403 on failure. Controllers do not recheck — middleware already did.
+- **Fine authorization (resource-bound)** — use case. "Can this principal act on this specific resource?" Requires loaded state, so it lives where state is loaded. Raises `AuthorizationException` → 403. This is what the validation rules call "authorization beyond identity."
+- **Tenant scoping** — repository. The partition key comes from the authenticated principal (the principal attached by middleware) and is applied as a `WHERE` clause on every query. Never trust a tenant ID from path, body, or query string. This prevents IDOR by construction, not by policy — and it is the same partition-key discipline the Scale section relies on.
 
 ```
-Request → AuthMiddleware (extract JWT, attach user context, check role) → Controller → UseCase
+Request → AuthMiddleware (principal + role gate) → Controller → UseCase (fine authorization) → Repository (tenant-scoped query)
 ```
 
-- Auth is adapter logic (middleware/controller layer), not business logic.
-- Use cases receive a user ID as input, not a token. They don't know about JWT.
+- Authentication and authorization span the edge **and** the use case — split deliberately. The edge handles identity and role; the use case handles resource-bound access.
+- 401 ≠ 403. Authentication failure (no/bad token) and authorization failure (logged-in but disallowed) are distinct exceptions and distinct status codes.
+- Log the principal ID and the resource on every authorization decision; the decision itself is not a secret.
 
 ### API Versioning
 
