@@ -129,6 +129,7 @@ Getting placement wrong is the most common cause of architectural drift — use 
 |------------|----------|----------|
 | Immutable data + invariants enforced in the constructor | **Entity** | `new Booking(...)`, `Booking::createNew(...)`, `Booking::reconstituteFromRow(...)` — no setters, no mutating methods |
 | Self-contained immutable concept with validation and equality | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
+| Immutable data carrier with no invariants, shaped for a specific consumer (projection, dashboard, API request/response) | **DTO** | `BookingDashboard`, `UserAnalyticsView`, `CreateBookingRequest` |
 | One operation over domain data — state transition, calculation, or multi-entity coordination | **Domain Service** | `BookingConfirmer.confirm(booking)`, `BookingCanceller.cancel(booking, reason)`, `PricingCalculator.calculate(booking, package)`, `AvailabilityFinder.find(professional, range)` |
 | Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
 | Producing immutable entities or DTOs from a data source | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()`, `BookingDashboardRepository.find()`, `UserAnalyticsRepository.findForMonth()` |
@@ -138,11 +139,12 @@ Getting placement wrong is the most common cause of architectural drift — use 
 **Decision rule.** Ask, in order:
 
 1. Immutable data + construction-time invariants for one concept? → **Entity** or **Value Object** (entity if it has an identity over time; value object if it is defined by its data).
-2. Touches I/O? → **Infrastructure adapter**, behind an interface.
-3. Generic technical logic with no domain concepts? → **Shared Service**.
-4. One operation over domain data (transition, calculation, coordination)? → **Domain Service** — one service per operation, named for what it does.
-5. Single business operation owning a transaction? → **Use Case**.
-6. Reads from or writes to a data source? → **Repository** — aggregate repository for the source-of-truth aggregate; read-only repository for any other shape (cross-aggregate joins, dashboards, analytics, derived views).
+2. Immutable data, no invariants, shaped for a specific consumer (projection, dashboard, API request/response)? → **DTO**.
+3. Touches I/O? → **Infrastructure adapter**, behind an interface.
+4. Generic technical logic with no domain concepts? → **Shared Service**.
+5. One operation over domain data (transition, calculation, coordination)? → **Domain Service** — one service per operation, named for what it does.
+6. Single business operation owning a transaction? → **Use Case**.
+7. Reads from or writes to a data source? → **Repository** — aggregate repository for the source-of-truth aggregate; read-only repository for any other shape (cross-aggregate joins, dashboards, analytics, derived views).
 
 **One service = one operation.** A domain service does one thing. `BookingManager` with `confirm()`, `cancel()`, `reschedule()` is the wrong shape — split into `BookingConfirmer`, `BookingCanceller`, `BookingRescheduler`. The discipline solves both ends: invariants live in the obvious file, and "what can I do with a `Booking`?" is answered by `ls src/Domain/Booking/`.
 
