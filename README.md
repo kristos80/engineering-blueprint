@@ -131,7 +131,7 @@ Getting placement wrong is the most common cause of architectural drift — use 
 | Self-contained immutable concept with validation and equality | **Value Object** | `Money`, `EmailAddress`, `PhoneNumber`, `DateRange` |
 | One operation over domain data — state transition, calculation, or multi-entity coordination | **Domain Service** | `BookingConfirmer.confirm(booking)`, `BookingCanceller.cancel(booking, reason)`, `PricingCalculator.calculate(booking, package)`, `AvailabilityFinder.find(professional, range)` |
 | Orchestration of one business operation in one transaction | **Use Case** | `CreateBookingUseCase`, `CancelBookingUseCase` |
-| Producing immutable DTOs from a data source | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()`, `BookingDashboardRepository.find()`, `UserAnalyticsRepository.findForMonth()` |
+| Producing immutable entities or DTOs from a data source | **Repository** | `BookingRepository.findById()`, `BookingRepository.save()`, `BookingDashboardRepository.find()`, `UserAnalyticsRepository.findForMonth()` |
 | Reusable technical logic — no domain concepts, no I/O | **Shared Service** | `IdGenerator`, `Slugifier`, `Clock`, `RetryPolicy` |
 | I/O against external systems | **Infrastructure adapter** (behind an interface) | `RedisCacheAdapter`, `BillingProviderApiClient`, `SqsQueueAdapter` |
 
@@ -221,10 +221,14 @@ src/Controller/
 
 ### Repositories
 
-A **repository** is any class that produces immutable DTOs from a data source, behind an interface. Two flavors on the same axis:
+A **repository** is any class that produces immutable entities or DTOs from a data source, behind an interface. Two flavors on the same axis:
 
 - **Aggregate repository** — owns one aggregate's read+write surface. Partition-scoped, source-of-truth queries. Returns the entity; accepts it on writes.
 - **Read-only repository** — shapes DTOs that aren't the aggregate: cross-aggregate joins, dashboards, analytics, derived views. No write methods.
+
+"Aggregate" here covers single-entity cases too. A flat `Booking` loaded from one table is an aggregate of size one; the repository is still the aggregate repository because it owns reads + writes for that entity. The distinction from read-only repositories is about write authority, not entity count.
+
+Value Objects are properties of entities and DTOs, not repository return types. `Money`, `EmailAddress`, and similar concepts surface as typed fields inside the entity or DTO the repository hands back, never as a top-level return.
 
 Same category, same conventions. Naming rule: `{WhatItReturns}Repository`.
 
@@ -245,7 +249,7 @@ src/Domain/
 
 **Repository rules:**
 
-- Returns and accepts immutable DTOs (or primitives) — no mutable input
+- Returns immutable entities (aggregate repository) or DTOs (read-only repository); accepts entities, DTOs, or primitives on writes — no mutable input
 - Behind an interface; the implementation reads from a single data source
 - No calls to other repositories — cross-aggregate orchestration belongs in the use case or domain service
 - No I/O beyond the data source — no HTTP calls, no queue dispatches, no filesystem
