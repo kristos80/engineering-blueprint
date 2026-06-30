@@ -17,6 +17,8 @@ This is a **standalone reference** — a map for engineering decisions across pr
 Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/README.md
 ```
 
+> **Current review status — 2026-06-30.** An end-to-end review of this blueprint is in progress. Sections **Design Principles**, **Project Structure**, **Architecture**, and **API Design** have been reviewed and accepted; review continues from **Reliability** onward. The `score-monorepo` submodule pointer that tracks this blueprint will be bumped once the full review is complete, rather than after each section-level PR.
+
 ## Table of Contents
 
 - [Design Principles](#design-principles)
