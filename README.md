@@ -49,6 +49,14 @@ Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/REA
   - [Concurrency Control](#concurrency-control)
   - [Data Evolution Safety](#data-evolution-safety)
   - [Backward Compatibility Testing](#backward-compatibility-testing)
+- [Frontend](#frontend)
+  - [Architecture](#architecture-1)
+  - [Where Frontend Logic Lives](#where-frontend-logic-lives)
+  - [Authentication in Browsers](#authentication-in-browsers)
+  - [Asset Injection](#asset-injection)
+  - [Per-Page Context](#per-page-context)
+  - [One Bundle, Internal Dispatch](#one-bundle-internal-dispatch)
+  - [Frontend Anti-Patterns](#frontend-anti-patterns)
 - [Read Path Classification](#read-path-classification)
   - [Critical Paths](#critical-paths)
   - [Tolerant Paths](#tolerant-paths)
@@ -798,6 +806,86 @@ Three layers enforce the discipline:
 No single layer is sufficient alone. The deserializer centralizes the logic. The fixtures prove every version works. The expand-contract sequence ensures old and new coexist long enough for the migration to complete.
 
 **Schema-level changes don't need this.** The database itself is the enforcement layer — migrations succeed with correct defaults or fail. End-to-end tests against a real database validate that code and schema agree. The discipline above exists precisely because JSON columns, queues, and caches lack that built-in enforcement.
+
+## Frontend
+
+Server-side rendered, multi-page. JavaScript is progressive enhancement, not the whole app.
+
+### Architecture
+
+- **Server-side rendering (SSR), multi-page application (MPA).** Every URL is a real server route that returns fully-rendered HTML. Navigation reloads the page.
+- **No SPA.** No client-side router. No history-API manipulation for view state. No route guards in JS.
+- **JS framework as view-layer only.** Data binding, AJAX, templates. Not a router. Not a global state store. Not a build-time application shell.
+- **Framework choice is per-project**, not blueprint-mandated. Any framework that can operate as view-layer sprinkles (Alpine, Vue in mount-mode, plain reactive libraries, or a heavier framework used as a component library) fits. Frameworks whose value proposition *is* SPA routing and global state stop paying rent under these rules.
+
+### Where Frontend Logic Lives
+
+| Concern | Lives on the | Rationale |
+|---|---|---|
+| URL routing | server | Server owns every URL; the browser reloads on navigation |
+| Auth session | server (JWT in an HttpOnly cookie) | Browser attaches on every request; JS never touches the token |
+| Persistent state | server (round-trip on write, re-render on read) | State that survives a reload lives in the database |
+| Per-page data hydration | server (context blob injected into the HTML) | The backend already knows what the page needs; embedding is one fewer round-trip |
+| DOM data binding | client (single JS bundle; internal scenario dispatch) | View-layer only. One framework instance, one bundle, one asset to cache. |
+| AJAX to internal endpoints | client (JS framework) | Progressive enhancement — live updates, form actions, incremental UI |
+| Client-rendered templates | client (JS framework) | For content that must change without a page reload |
+| Page-scoped ephemeral state | client (framework instance memory) | Dies with the page — dropdown open/closed, filter state before submit |
+
+### Authentication in Browsers
+
+- **JWT in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie.** Set on login, cleared on logout. Browser attaches on every same-origin request automatically. JS never reads it.
+- **Programmatic clients** (SDKs, headless integrations, mobile apps) use `Authorization: Bearer <token>` — same JWT, different transport.
+- **Middleware verifies both paths identically.** Cookie present OR Authorization header present → same principal extraction.
+- **CSRF.** Same-origin + `SameSite=Lax` is sufficient for same-origin form POSTs. When mixing origins, embed a CSRF token in the context blob (see below) and require it on state-changing endpoints.
+
+### Asset Injection
+
+- **Backend emits every page** with references to the current JS bundle(s), versioned so the browser cannot serve a stale copy.
+- **Versioning is either a content hash in the filename** (`/assets/app.abc123.js`) **or a query-string version tag** (`/assets/app.js?v=abc123`). Both are acceptable; use whichever your framework's build tooling already produces.
+- **The version identifier** (`abc123` above) can come from any deterministic source that changes when the bundle changes: content hash, build timestamp, git SHA, incrementing build number.
+- **The backend reads a manifest** (`assets.json` or equivalent) at render time that maps logical names to the current version identifier. The manifest is the source of truth; templates never hardcode paths.
+- **Cache headers.** On hashed-filename assets: `Cache-Control: public, immutable, max-age=31536000` — safe because the URL itself changes on rebuild. On query-string-versioned assets: `Cache-Control: public, max-age=31536000` — the browser sees the changed query string as a different resource, same effect.
+
+### Per-Page Context
+
+- **The backend injects one global blob** into the rendered HTML, before any script tags load:
+
+  ```html
+  <script>window.__APP__ = {
+    context:  { page: "settings.billing", account_id: 42 },
+    csrf:     "…",
+    flags:    { … },
+    api_base: "/api/v1"
+  };</script>
+  ```
+
+- **`context.page` identifies which page this is.** The boot code reads it, dispatches to the corresponding component, mounts it.
+- **`context` carries stable-per-URL state only.** Anything that could change between two loads of the same URL — cart contents, notification counts, unread messages, live inventory, "last seen X" — is **not** in the blob. It is fetched by an AJAX call after boot.
+  - **Rule of thumb:** if a cache layer (CDN, reverse proxy, browser) could serve the same rendered HTML to two visitors or to the same visitor twice with different expected values, that data does not belong in the blob. An extra request beats stale data.
+  - **Blob-safe:** `page`, `account_id`, `csrf`, `api_base`, `flags`, feature-flag values that don't move between deploys, static labels.
+  - **Blob-unsafe (fetch on load):** `cart`, `notifications_unread`, `wallet_balance`, `live_stock_levels`, `session_start`, `last_activity_at`.
+- **No client-side `/me` or `/config` calls for stable-per-URL data.** The backend already knew — inject it.
+- **JS never derives routing state from `window.location`.** The context blob is authoritative.
+- **Environment-specific configuration** (`api_base`, feature flags, public tokens that don't rotate per-session) goes through the blob, never through hardcoded module constants.
+
+### One Bundle, Internal Dispatch
+
+- **One JS bundle for the whole application**, not one per page. The framework's runtime cost pays off across every page; the browser caches the bundle once.
+- **A tiny internal dispatcher** — a switch on `__APP__.context.page` — maps the scenario name to the component that owns it and mounts it. The dispatcher is not a router in the SPA sense (it does not touch URLs or history). It is a `page → component` lookup that runs once at boot.
+- **Per-scenario code lives as components inside the bundle**, split by file or module for code organization, but shipped and loaded together. Lazy code-splitting is fine when the bundle grows large enough to matter; it is a size optimization, not an architectural rule.
+- **The dispatcher never falls back to DOM detection.** It reads the context blob or does nothing.
+
+### Frontend Anti-Patterns
+
+- **SPA routing.** No `router-link`, no history-API for view state, no route guards in JS. If URL routing is happening in the browser, the app has drifted off the blueprint.
+- **Client-side state stores** (Redux, Pinia, Zustand, MobX, etc.) as authoritative state. Ephemeral view state is fine; persistent state belongs on the server.
+- **`localStorage` or `sessionStorage` for auth tokens.** Cookies with `HttpOnly` beat every JS-accessible storage on XSS resistance. If JS can read it, an injected script can too.
+- **Fetching page config on load** for stable-per-URL data (`/me`, `/config`, `/features` from boot code). The backend rendered the page — it already knew. Inject it in the context blob. Fetching mutable data on load (cart, notifications) is expected and correct.
+- **Deriving the current route from `window.location`.** The context blob names the page; JS never guesses.
+- **Uncached assets** (`app.js` with no version tag at all — browser and CDN serve whatever they cached last). Version via content hash or query string; either works.
+- **Boot code that branches on DOM presence** (checking `document.querySelector('.cart-page')` to decide what to run). The context blob names the scenario; JS never guesses from the DOM. This is different from having one main bundle — one bundle with an authoritative dispatcher is the pattern; one bundle that scans the DOM to figure out where it is, is not.
+- **Mutable data in the context blob.** Cart contents, unread counts, wallet balances, or any value that could differ between two loads of the same URL. Extra AJAX beats stale data.
+- **SSR-then-hydrate frameworks that still ship the full application shell to the client.** The blueprint's SSR is real SSR — HTML from the server, JS as enhancement. Frameworks whose "SSR mode" still boots a client router are outside this posture.
 
 ## Read Path Classification
 
