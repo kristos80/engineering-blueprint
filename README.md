@@ -2,6 +2,12 @@
 
 An opinionated engineering blueprint for building applications. Language-agnostic, framework-agnostic. These standards apply to any project built on object-oriented, stateless request-response architecture.
 
+## Engineering Goal
+
+The primary goal of this blueprint is to minimize the cognitive context required to reason about correctness. Every architectural decision should reduce the amount of code, state, and interactions a developer must understand before confidently making a change.
+
+Determinism, immutability, explicit contracts, isolated units, and mutation testing are consequences of that objective — not independent rules.
+
 ## How to Use This Blueprint
 
 This is a **standalone reference** — a map for engineering decisions across projects. It is not tied to any specific codebase.
@@ -10,12 +16,7 @@ This is a **standalone reference** — a map for engineering decisions across pr
 
 **For existing projects:** adopt selectively. Use the table of contents to find the section relevant to your current decision, and apply what fits.
 
-**For AI-assisted development:** point Claude Code at this blueprint by adding the following to your project's `CLAUDE.md`:
-
-```
-## Engineering Standards
-Follow the engineering blueprint at: /absolute/path/to/engineering-blueprint/README.md
-```
+**For AI-assisted development:** point your AI assistant at this blueprint 
 
 > **Work in progress.** This blueprint is under active end-to-end review. As of 2026-06-30, sections from **Design Principles** through **API Design** are considered settled; sections from **Reliability** onward are pending review and may change.
 
