@@ -53,7 +53,7 @@ When working on any project that references this blueprint, follow these rules:
 - Structured JSON logs — never log secrets, tokens, or unnecessary personal data
 
 ### Testing
-- 100% code coverage, 100% mutation score where applicable
+- 100% coverage / 100% mutation is the **target state**, gated per interface by a `sealed` marker. During `exploration` (default) there is no test bar — writing tests against churning contracts is waste. Sealing is a deliberate human act; the interface itself is the contract. Value objects, pure parsers, and DTOs are tested from day one regardless (they *are* their own contract).
 - Stubs by default, mocks only when the side effect IS the behavior
 - Controller tests stub use cases; use case tests stub repositories
 - Repository tests are BOTH unit (stub the data source for branching/orchestration logic) AND integration (real DB for SQL/schema contract) — neither replaces the other

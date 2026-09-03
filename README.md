@@ -81,6 +81,7 @@ This is a **standalone reference** — a map for engineering decisions across pr
   - [Security](#security)
 - [Subscriptions & Payments](#subscriptions--payments)
 - [Testing](#testing)
+  - [Contract Maturity](#contract-maturity)
   - [Requirements](#requirements)
   - [Stubs vs Mocks](#stubs-vs-mocks)
   - [Isolation Per Layer](#isolation-per-layer)
@@ -1345,9 +1346,49 @@ Architecture is provider-agnostic via interfaces.
 
 ## Testing
 
+### Contract Maturity
+
+The requirements below are the **target state** — not the day-one state. During early exploration of a new system or aggregate, interfaces change fast. Tests written against an unstable interface are waste — they get rewritten (or deleted) as the contract shifts. The blueprint's own principle *"no premature abstraction — add structure when pain arrives, not before"* applies to test structure as much as to code structure.
+
+Since every injected dependency is already an interface (see [Design Principles](#design-principles) and the DI rules throughout this document), the interface **is** the contract. The interface stabilising is the maturity signal that gates when the 100%-coverage bar starts to bite.
+
+**Two states per interface.**
+
+- **`exploration`** *(default)*. No test bar. Implementations may merge without tests. This is a deliberate reprieve, not an oversight — the contract is still being discovered.
+- **`sealed`**. Blueprint-grade tests are required for any **new or modified** implementation of this interface. Sealing is a **deliberate human act** — a marker on the interface itself, chosen by whoever's working on the code (mechanism is language-specific: a documentation annotation, a per-aggregate note, whatever the project settles on). Unsealing before a planned refactor is also allowed — it's a decision, not a slip.
+
+**Mechanics of a sealed interface.**
+
+- **New implementations** — merge only with tests meeting the requirements below.
+- **Modifications to existing implementations** — same bar.
+- **Pre-seal implementations** — file a follow-up to backfill tests. Triaged separately; does not block current work.
+- **The interface itself cannot change** without being unsealed first. If a refactor is coming, unseal deliberately, then reseal when the shape settles again.
+
+**What signals that an interface is ready to seal.**
+
+- The interface hasn't been modified for a while (measured in whatever unit fits the project — pull requests since last change, days, release cycles).
+- Downstream consumers have stopped requesting shape changes.
+- A human — not a threshold — makes the call. Any automatic gate on a raw metric (PR count, calendar days) invites gaming and false signals. Use the metric as a *nudge* during review ("this interface hasn't changed in a while — seal or defer?"), never as an auto-seal.
+
+**Day-1 carve-outs — always tested, no seal ceremony required.**
+
+Some categories are their own contract by nature and cost nothing to test even during churn:
+
+- **Value objects.** Invariants and equality are stable by definition.
+- **Pure parsers.** Input → output is the contract; the test is the specification.
+- **DTOs.** Trivial to test; break loudly when the shape changes, which is often useful.
+
+Skipping these has no upside — they'd get tests eventually, and writing them early doesn't paint the project into a corner.
+
+**Why this doesn't devolve into "no tests ever."**
+
+- The default is not "skip tests." The default is *"this interface is in `exploration` — the contract is provisional, so tests are deferred."* The framing is temporal, not permanent.
+- Sealing is an ordinary part of moving code toward production. Any implementation crossing into a real request path, a release milestone, or another team's dependency triggers the seal question — and once sealed, the coverage bar is unconditional.
+- The nudge mechanism (interface unchanged for a while → review asks "seal or defer?") ensures the question actually gets asked, without turning into a hard gate that people work around.
+
 ### Requirements
 
-- **100% code coverage.** Every class, every method, every branch.
+- **100% code coverage.** Every class, every method, every branch. *(Applies once the interface is sealed — see [Contract Maturity](#contract-maturity).)*
 - **100% mutation score** where applicable. Surviving mutants indicate weak assertions.
 - **Every class is testable in isolation.** All dependencies injected through constructor interfaces.
 
