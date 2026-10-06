@@ -59,6 +59,9 @@ When working on any project that references this blueprint, follow these rules:
 - Repository tests are BOTH unit (stub the data source for branching/orchestration logic) AND integration (real DB for SQL/schema contract) — neither replaces the other
 - Repository unit tests assert behavior visible from return values, never SQL strings, parameter binding order, or driver call signatures
 - Infrastructure integration tests for anything behind an interface (repos, cache, queue)
+- Static analysis at the strictest level from day one, over production code; no baseline — suppress only inline, by rule, with a reason, and only where the fix would break another gate or repeat a check the called library already makes
+- Prefer a type annotation over a runtime cast or guard: runtime narrowing creates mutants, and one the runtime already performs is dead code
+- Cognitive complexity at most 9 per method and 40 per class (sum of methods); meet it by splitting along existing seams, never by raising the limit
 
 ### Security
 - HTTPS only, CORS whitelist, CSP headers

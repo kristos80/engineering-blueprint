@@ -83,6 +83,8 @@ This is a **standalone reference** — a map for engineering decisions across pr
 - [Testing](#testing)
   - [Contract Maturity](#contract-maturity)
   - [Requirements](#requirements)
+  - [Static Analysis](#static-analysis)
+  - [Complexity Limits](#complexity-limits)
   - [Stubs vs Mocks](#stubs-vs-mocks)
   - [Isolation Per Layer](#isolation-per-layer)
   - [Infrastructure Integration Tests](#infrastructure-integration-tests)
@@ -1212,7 +1214,7 @@ Two pitfalls worth flagging: regenerating the correlation ID mid-flow (breaks th
 **Every PR must pass:**
 
 - Unit tests (100% coverage)
-- Static analysis at max level
+- Static analysis at max level, including complexity limits (see [Static Analysis](#static-analysis) and [Complexity Limits](#complexity-limits))
 - Mutation testing
 - Database migrations against production-like schema
 - Frontend build + lint
@@ -1391,6 +1393,50 @@ Skipping these has no upside — they'd get tests eventually, and writing them e
 - **100% code coverage.** Every class, every method, every branch. *(Applies once the interface is sealed — see [Contract Maturity](#contract-maturity).)*
 - **100% mutation score** where applicable. Surviving mutants indicate weak assertions.
 - **Every class is testable in isolation.** All dependencies injected through constructor interfaces.
+- **Static analysis at the strictest level, with complexity limits.** See [Static Analysis](#static-analysis) and [Complexity Limits](#complexity-limits). Unlike the coverage bar, this applies from day one, sealed or not — a type annotation costs nothing to write while a contract is still churning.
+
+### Static Analysis
+
+**The strictest level the analyzer offers, over all production code and entry-point scripts.** Whether tests are analysed too is a decision each project makes explicitly; test code at the strictest level is mostly noise, and excluding it is a legitimate choice — leaving it undecided is not.
+
+**No baseline.** A baseline — a recorded list of existing findings the gate ignores — is a gate that only applies to new code, and the old findings never get fixed because nothing ever asks for them again. Adopting static analysis on an existing codebase means measuring first, then fixing every finding in one dedicated change before the gate goes live. The coverage and mutation gates are not baselined either.
+
+**Suppressions are inline, specific and justified.** A suppression names the exact rule it silences, sits on the line it applies to, and carries its reason in the same comment. A suppression that no longer matches a finding fails the build, so a fixed problem cannot leave a stale excuse behind. There are only two legitimate reasons:
+
+- **The fix would break another gate.** The usual case is a runtime narrowing (a cast, a type guard) that mutation testing cannot kill, because the runtime already behaves identically without it.
+- **The library being called enforces the rule itself.** If a dependency already refuses an empty key at runtime, a second check in front of it duplicates the refusal and adds a branch nobody can observe.
+
+**Prefer a type over code.** Static analysis and mutation testing pull in opposite directions when a finding is fixed with runtime code: every cast or guard is new behaviour, and new behaviour produces mutants that need a test to kill them. A type annotation narrows what the analyzer sees and produces no mutants at all. When the runtime already performs the narrowing — a numeric string coerced to an integer array key, say — the cast is dead code, its mutant is equivalent, and the right fix is an annotation stating the type, not a cast enforcing it.
+
+**Narrow untyped data once, where it enters.** Database rows, decoded JSON, router attributes and container lookups arrive untyped. Narrow them at the adapter that receives them — the repository's row mapper, the controller's input parsing (see [Input Validation](#input-validation)) — so that everything past that point carries real types. The same untyped value narrowed in five places is five chances to narrow it differently.
+
+**Read the findings; don't just silence them.** At the strictest level, findings are often contract bugs rather than type noise:
+
+- **"This catch can never trigger"** usually means an exception is thrown but not declared on the method or interface in between. The catch is right; the contract is incomplete.
+- **"This check is always true"** is dead code — a guard whose case the types already exclude. Delete it.
+- **A callback typed with a concrete class where the API passes an interface** works until the implementation changes. Type it to the interface.
+
+### Complexity Limits
+
+**Measure cognitive complexity, not cyclomatic complexity or CRAP.** Cyclomatic complexity counts paths, so a flat list of ten independent filters scores the same as ten nested conditions, though only one of them is hard to read. CRAP combines cyclomatic complexity with coverage — `complexity² × (1 − coverage)³ + complexity` — and at the 100 % coverage this blueprint requires it collapses to cyclomatic complexity, adding no information the coverage gate does not already enforce.
+
+**How cognitive complexity is scored:**
+
+- **+1** for each break in straight-line flow: `if`, `else if`, `else`, `switch`, `match`, every loop, `catch`, a ternary, `break`/`continue` to a label, `goto`.
+- **+1 more for each level of nesting** the break sits inside. An `if` inside a loop inside an `if` costs 1 + 2 + 3.
+- **+1 per run of like boolean operators.** `a && b && c` costs 1; `a && b || c` costs 2.
+- **Free:** method calls, early returns, null-coalescing, null-safe access, and length. Extracting a well-named method lowers the score.
+- **A class scores the sum of its methods** — total branching in one place, not the number of methods. Ten trivial methods score close to zero.
+
+**The limits: 9 per method, 40 per class.** They are the blueprint's numbers, not a starting point each project tunes. A limit chosen per project invites being chosen to fit the code that exists.
+
+**Meet the limit by splitting along seams the code already has — never by raising the limit.** A limit set at the current worst method gates nothing; it only records how bad things already are. The seams are usually obvious once looked for:
+
+- **A controller serving two HTTP verbs** becomes one controller per verb — the same one-operation-per-class shape as [Controller Conventions](#controller-conventions) and the one-service-per-operation rule.
+- **A query builder over filters and search** becomes a criteria half and a search half, merged by the original method.
+- **A constructor validating several fields** loses the redundant conditions first — `x !== null && x === ""` is just `x === ""`.
+
+**A method sitting exactly at the limit is the next one to split.** Note it when it lands there, so the next branch added to it arrives with its split rather than as a surprise in review.
 
 ### Stubs vs Mocks
 
@@ -1560,6 +1606,9 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 - **Mocks where stubs suffice.** Mocks signal "the side effect *is* the behavior being verified." Stubs signal "this is a placeholder." Default to stubs.
 - **Asserting SQL strings or driver call signatures in repository unit tests.** Couples tests to implementation — the SQL can change without behavior changing, and the test breaks. Stub the data source to verify branching logic (null handling, mapping, orchestration), but never assert *how* the query was constructed. The schema contract is verified by integration tests. See [Isolation Per Layer](#isolation-per-layer).
 - **Tests coupled to implementation.** Test names describe behavior, not method calls. Renaming a private method must not break a test.
+- **Baselining static analysis.** A recorded list of ignored findings is a gate that only applies to new code. Fix the findings; suppress inline, by rule, with a reason, only where the fix would break another gate or repeat a check the called library already makes. See [Static Analysis](#static-analysis).
+- **Raising a complexity limit to fit the code.** The limit is what the code must fit. Split along an existing seam instead. See [Complexity Limits](#complexity-limits).
+- **Casting to satisfy the type checker where the runtime already coerces.** The cast is dead code and an equivalent mutant. State the type with an annotation instead.
 
 ### Process
 
@@ -1640,6 +1689,7 @@ Review confirms these were followed; it does not duplicate their work:
 - **Backward compatibility of unstructured data** (JSON columns, queue payloads, cache) — covered by deserializer + fixture-per-version tests. See [Backward Compatibility Testing](#backward-compatibility-testing).
 - **Schema changes** — covered by expand-contract migrations. See [Data Evolution Safety](#data-evolution-safety).
 - **Test coverage and mutation score** — enforced by CI gates.
+- **Type errors and complexity** — enforced by static analysis and its complexity limits. If the gate passes, method length and nesting depth are not review topics; whether a split landed on the right seam still is.
 - **Style and formatting** — enforced by linters and formatters.
 - **Performance and scalability speculation** — the blueprint adopts scaling patterns when pain arrives, not before (see [Scaling Guidelines](#scaling-guidelines)). Flag a known bottleneck on a hot path; do not speculate about hypothetical scale.
 
