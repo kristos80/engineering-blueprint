@@ -35,6 +35,7 @@ When working on any project that references this blueprint, follow these rules:
 ### API design
 - JSON envelope: `data` on success, `error` on failure — never both
 - Validation in the controller (adapter logic), use cases assume valid input
+- Writes: `POST` creates, `PATCH` edits, `POST /{id}/{verb}` acts, `DELETE` deletes. One edit endpoint per resource, partial (JSON Merge Patch: absent unchanged, `null` clears, arrays replaced whole); what a state allows is use-case validation, never a second endpoint. `PUT` only for a representation the client always sends whole
 - Exception-to-HTTP mapping: ValidationException→422, NotFoundException→404, DomainException→409, AuthenticationException→401, AuthorizationException→403
 - JWT for stateless auth — use cases receive user ID, never tokens
 
