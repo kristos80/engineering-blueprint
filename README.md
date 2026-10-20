@@ -40,6 +40,7 @@ This is a **standalone reference** — a map for engineering decisions across pr
   - [Response Format](#response-format)
   - [Error Handling](#error-handling)
   - [Input Validation](#input-validation)
+  - [Write Endpoints](#write-endpoints)
   - [Authentication & Authorization](#authentication--authorization)
   - [API Versioning](#api-versioning)
   - [Rate Limiting](#rate-limiting)
@@ -442,6 +443,59 @@ class BookingCreateController extends AbstractController
         result = useCase.execute(body)
         return jsonResponse(response, result)
 ```
+
+### Write Endpoints
+
+Every write to a resource is one of four kinds, and each kind has one shape:
+
+| Kind | Endpoint | Body |
+|------|----------|------|
+| **Create** | `POST /bookings` | The new resource |
+| **Edit** | `PATCH /bookings/{id}` | Only the fields that change |
+| **Action** — a state transition or command | `POST /bookings/{id}/confirm`, `/cancel`, `/publish` | The action's own arguments, if any |
+| **Delete** | `DELETE /bookings/{id}` | None |
+
+**One edit endpoint per resource.** Whatever a screen lets a user change about a booking goes through `PATCH /bookings/{id}` — never a second endpoint for part of the form (`/bookings/{id}/contact-details`), and never one endpoint per state (`/bookings/{id}/confirmed-fields`). A second endpoint is always tempting, because it leaves the existing one untouched, and it always costs the same: two field sets that drift, a form whose own save silently drops what the other endpoint owns, and a client that has to know which URL the current state wants.
+
+**Partial by default — [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396) semantics.**
+
+- A field **absent** from the body is left as it is.
+- A field sent as **`null`** is cleared.
+- A field sent with a **value** is set.
+- An **array** is replaced whole when it is sent. There is no patching inside a list.
+
+A screen therefore sends what changed, and a client that never renders a field can never wipe it — the failure a full replacement invites. Telling "absent" from "`null`" is structural validation, so it is the controller's job, and whatever carries the edit to the use case must hold "not sent" as something other than `null`: a nullable field alone cannot express it. How a language represents that is a project convention.
+
+**What a state allows is business validation.** Which fields may change in which state is a rule about current state, so it lives in the use case (see [Input Validation](#input-validation)), however complex it gets — never in the routing. The use case locks the row, checks every *sent* field against the current state, and refuses a locked one with a `DomainException` naming the field (409). A locked field sent with its current value is a no-op rather than a refusal, so a client that resends unchanged fields does not fail on them.
+
+**Validate the merged result, not the fragment.** Apply the patch to the locked current state, then check the invariants on what would be stored. A rule that spans two fields holds whether one, both or neither of them was sent.
+
+```
+class EditBookingUseCase
+
+    function execute(bookingId: Int, userId: Int, patch: BookingPatch): void
+        transaction.run(() =>
+            booking = bookingRepository.findByIdForUpdate(bookingId)
+
+            if booking is null
+                throw BookingNotFoundException(bookingId)
+
+            if booking.status == BookingStatus.CONFIRMED and patch.has("scheduledAt")
+                    and patch.scheduledAt != booking.scheduledAt
+                throw BookingLockedException("scheduledAt", booking.status)
+
+            edited = bookingEditor.apply(booking, patch)   // absent fields keep their stored values
+            bookingRepository.save(edited)                 // the edited entity's constructor holds the invariants
+        )
+```
+
+**An action is not an edit.** A state transition runs its own guards, side effects and logging (see [State Guards & Idempotency](#state-guards--idempotency)), so it is its own endpoint. A `status` field in a `PATCH` turns the edit into a hidden state machine.
+
+**A child with its own lifecycle is its own resource.** Messages on a task, attachments on a message: they are created and deleted on their own, so they live at `/tasks/{id}/messages`, not inside the task's edit.
+
+**Concurrency is unchanged.** An edit is an update, so pick pessimistic or optimistic locking by criticality (see [Concurrency Control](#concurrency-control)). Partial edits make conflicts rarer — two users changing different fields no longer overwrite each other — but not impossible.
+
+**When `PUT` is right:** full replacement of a representation the client always holds whole and sends as a unit (a settings document), or create-or-replace at an id the client chooses. Otherwise, an edit is a `PATCH`.
 
 ### Authentication & Authorization
 
@@ -889,6 +943,7 @@ Server-side rendered, multi-page. JavaScript is progressive enhancement, not the
 - **Uncached assets** (`app.js` with no version tag at all — browser and CDN serve whatever they cached last). Version via content hash or query string; either works.
 - **Boot code that branches on DOM presence** (checking `document.querySelector('.cart-page')` to decide what to run). The context blob names the scenario; JS never guesses from the DOM. This is different from having one main bundle — one bundle with an authoritative dispatcher is the pattern; one bundle that scans the DOM to figure out where it is, is not.
 - **Mutable data in the context blob.** Cart contents, unread counts, wallet balances, or any value that could differ between two loads of the same URL. Extra AJAX beats stale data.
+- **More than one save path on one form.** Two Save buttons, or one button that picks a URL by the record's state. A form saves through its resource's one `PATCH` and sends what changed; the server says what the current state locks, and the form shows it. See [Write Endpoints](#write-endpoints).
 - **SSR-then-hydrate frameworks that still ship the full application shell to the client.** The blueprint's SSR is real SSR — HTML from the server, JS as enhancement. Frameworks whose "SSR mode" still boots a client router are outside this posture.
 
 ## Read Path Classification
@@ -1594,6 +1649,12 @@ What this blueprint explicitly does not do. Each rule is enforced somewhere in t
 - **String concatenation in SQL.** Parameterized queries only — including for "internal" or "trusted" input. There is no trusted input.
 - **Editing a deployed migration.** Schema history is append-only. Generate a new migration; never rewrite history that has run anywhere.
 - **`DOWN` migrations against live data.** Rollback is *code* rollback to the previous SHA. Live schema reversals corrupt data and the expand-contract pattern.
+
+### API
+
+- **A second edit endpoint for part of a resource, or one per state.** One resource, one `PATCH`; what a state allows is the use case's validation. See [Write Endpoints](#write-endpoints).
+- **Full-replacement `PUT` as the default edit.** Any field the client did not send is cleared, so a screen that does not render a field destroys it. Edits are partial; `PUT` is for representations the client always holds whole.
+- **State transitions as edits.** A `status` field in a `PATCH` skips the action's own guards and side effects. Transitions are actions: `POST /{resource}/{id}/{verb}`.
 
 ### State and caching
 
